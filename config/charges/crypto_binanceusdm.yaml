@@ -1,0 +1,11 @@
+# Binance USDⓈ-M futures, Regular user / VIP 0, no BNB discount.
+# VERIFY against the official page before relying on it (could not be fetched from the build sandbox;
+# cross-checked with secondary sources in Sep 2026).
+kind: crypto
+source_url: https://www.binance.com/en/fee/futureFee
+as_of: 2026-09-26
+verified: false
+maker_pct: 0.02
+taker_pct: 0.05
+gst_pct: 0
+notes: "Funding payments are applied separately at each funding timestamp."

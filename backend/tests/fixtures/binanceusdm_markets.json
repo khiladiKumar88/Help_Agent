@@ -1,0 +1,206 @@
+{
+ "BTC/USDT:USDT": {
+  "id": "BTCUSDT",
+  "symbol": "BTC/USDT:USDT",
+  "base": "BTC",
+  "quote": "USDT",
+  "settle": "USDT",
+  "type": "swap",
+  "spot": false,
+  "swap": true,
+  "future": false,
+  "option": false,
+  "contract": true,
+  "linear": true,
+  "inverse": false,
+  "contractSize": 1,
+  "expiry": null,
+  "expiryDatetime": null,
+  "strike": null,
+  "optionType": null,
+  "active": true,
+  "precision": {
+   "amount": 0.001,
+   "price": 0.1
+  },
+  "limits": {
+   "amount": {
+    "min": 0.001,
+    "max": 1000
+   },
+   "cost": {
+    "min": 5
+   }
+  }
+ },
+ "ETH/USDT:USDT": {
+  "id": "ETHUSDT",
+  "symbol": "ETH/USDT:USDT",
+  "base": "ETH",
+  "quote": "USDT",
+  "settle": "USDT",
+  "type": "swap",
+  "spot": false,
+  "swap": true,
+  "future": false,
+  "option": false,
+  "contract": true,
+  "linear": true,
+  "inverse": false,
+  "contractSize": 1,
+  "expiry": null,
+  "expiryDatetime": null,
+  "strike": null,
+  "optionType": null,
+  "active": true,
+  "precision": {
+   "amount": 0.001,
+   "price": 0.01
+  },
+  "limits": {
+   "amount": {
+    "min": 0.001,
+    "max": 1000
+   },
+   "cost": {
+    "min": 5
+   }
+  }
+ },
+ "BTC/USDT": {
+  "id": "BTCUSDT",
+  "symbol": "BTC/USDT",
+  "base": "BTC",
+  "quote": "USDT",
+  "settle": null,
+  "type": "spot",
+  "spot": true,
+  "swap": false,
+  "future": false,
+  "option": false,
+  "contract": false,
+  "linear": null,
+  "inverse": null,
+  "contractSize": null,
+  "expiry": null,
+  "expiryDatetime": null,
+  "strike": null,
+  "optionType": null,
+  "active": true,
+  "precision": {
+   "amount": 1e-05,
+   "price": 0.01
+  },
+  "limits": {
+   "amount": {
+    "min": 1e-05,
+    "max": 1000
+   },
+   "cost": {
+    "min": 5
+   }
+  }
+ },
+ "BTC/USD:BTC": {
+  "id": "BTCUSD",
+  "symbol": "BTC/USD:BTC",
+  "base": "BTC",
+  "quote": "USD",
+  "settle": "BTC",
+  "type": "swap",
+  "spot": false,
+  "swap": true,
+  "future": false,
+  "option": false,
+  "contract": true,
+  "linear": false,
+  "inverse": true,
+  "contractSize": 100,
+  "expiry": null,
+  "expiryDatetime": null,
+  "strike": null,
+  "optionType": null,
+  "active": true,
+  "precision": {
+   "amount": 1,
+   "price": 0.1
+  },
+  "limits": {
+   "amount": {
+    "min": 1,
+    "max": 1000
+   },
+   "cost": {
+    "min": 5
+   }
+  }
+ },
+ "BTC/USDT:USDT-261225": {
+  "id": "BTCUSDT",
+  "symbol": "BTC/USDT:USDT-261225",
+  "base": "BTC",
+  "quote": "USDT",
+  "settle": "USDT",
+  "type": "future",
+  "spot": false,
+  "swap": false,
+  "future": true,
+  "option": false,
+  "contract": true,
+  "linear": true,
+  "inverse": false,
+  "contractSize": 1,
+  "expiry": 1798185600000,
+  "expiryDatetime": null,
+  "strike": null,
+  "optionType": null,
+  "active": true,
+  "precision": {
+   "amount": 0.001,
+   "price": 0.1
+  },
+  "limits": {
+   "amount": {
+    "min": 0.001,
+    "max": 1000
+   },
+   "cost": {
+    "min": 5
+   }
+  }
+ },
+ "BTC/USDT:USDT-261225-70000-C": {
+  "id": "BTCUSDT",
+  "symbol": "BTC/USDT:USDT-261225-70000-C",
+  "base": "BTC",
+  "quote": "USDT",
+  "settle": "USDT",
+  "type": "option",
+  "spot": false,
+  "swap": false,
+  "future": false,
+  "option": true,
+  "contract": true,
+  "linear": true,
+  "inverse": false,
+  "contractSize": 1,
+  "expiry": 1798185600000,
+  "expiryDatetime": null,
+  "strike": 70000,
+  "optionType": "call",
+  "active": true,
+  "precision": {
+   "amount": 0.01,
+   "price": 5
+  },
+  "limits": {
+   "amount": {
+    "min": 0.01,
+    "max": 1000
+   },
+   "cost": {
+    "min": 5
+   }
+  }
+ }
+}

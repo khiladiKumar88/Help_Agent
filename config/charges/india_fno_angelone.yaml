@@ -1,0 +1,19 @@
+# NSE F&O via Angel One (used from Phase 5). Percentages are % of turnover
+# (options: % of premium turnover). VERIFY against the official charge sheet.
+# STT reflects Union Budget 2026-27 rates effective 2026-04-01 (futures 0.05%, options 0.15%).
+kind: india_fno
+source_url: https://www.angelone.in/exchange-transaction-charges
+as_of: 2026-09-26
+verified: false
+brokerage_per_order: 20
+brokerage_pct_cap: null
+stt_futures_sell_pct: 0.05
+stt_options_sell_pct: 0.15
+exchange_futures_pct: 0.00173
+exchange_options_pct: 0.03503
+sebi_per_crore: 10
+stamp_futures_buy_pct: 0.002
+stamp_options_buy_pct: 0.003
+ipft_pct: 0
+gst_pct: 18
+notes: "GST applies to brokerage + exchange txn + SEBI fee. STT on option exercise not modelled yet."

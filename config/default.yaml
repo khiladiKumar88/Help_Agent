@@ -1,0 +1,29 @@
+# PaperMind defaults. Secrets never go here — use .env (see .env.example).
+server:
+  host: 127.0.0.1
+  port: 8000
+
+db_url: sqlite:///papermind.db     # override with PAPERMIND_DB_URL (e.g. postgresql+psycopg://...)
+equity_snapshot_seconds: 60
+
+data:
+  stale_after_seconds: 10          # no tick for this long => stale => no new entries (rule R004)
+  crypto:
+    provider: ccxt                 # ccxt | simulated   (override: PAPERMIND_CRYPTO_PROVIDER)
+    exchange: binanceusdm          # any ccxt id; public market data only
+    feed: ws                       # ws (falls back to poll automatically) | poll
+    poll_interval_seconds: 1.0
+    candle_poll_seconds: 20
+    funding_poll_seconds: 300
+    history_candles: 500
+    symbols:
+      - BTC/USDT:USDT
+      - ETH/USDT:USDT
+    simulated:                     # offline deterministic feed, clearly labelled SIMULATED in the UI
+      seed: 42
+      tick_interval_seconds: 1.0
+      annual_vol: 0.6
+      spread_bps: 1
+      start_prices:
+        BTC/USDT:USDT: 65000
+        ETH/USDT:USDT: 3000

@@ -1,0 +1,5 @@
+# NSE trading holidays (used by India books from Phase 5).
+# Fill from the official NSE holiday list for the year; left empty until then.
+source_url: https://www.nseindia.com/resources/exchange-communication-holidays
+verified: false
+holidays: []

@@ -1,0 +1,29 @@
+# Book = market x segment x style. Own wallet (USDT), own risk limits, own stats.
+id: crypto-futures-intraday
+market: crypto
+segment: futures
+style: intraday
+currency: USDT
+mode: manual
+starting_capital: 1000
+data_source: crypto
+instruments:                       # symbols; specs come from the exchange instrument master
+  - BTC/USDT:USDT
+  - ETH/USDT:USDT
+charges: crypto_binanceusdm
+trading_day_tz: UTC                # daily limits reset at 00:00 UTC
+timeframes:
+  signal: 15m
+  execution: 1m
+slippage:
+  model: bps
+  bps: 2                           # adverse slippage on top of bid/ask
+  est_spread_bps: 2                # used only when bid/ask are missing
+risk:
+  max_risk_per_trade_pct: 1        # % of equity, incl. estimated round-trip fees
+  max_leverage: 3
+  max_open_positions: 2
+  max_trades_per_day: 10
+  daily_loss_limit_pct: 3          # % of start-of-day equity; halts the book for the day
+  flatten_on_daily_loss: true
+session: null                      # 24x7
