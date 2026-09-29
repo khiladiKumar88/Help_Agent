@@ -170,6 +170,11 @@ class CcxtProvider(MarketDataProvider):
         return ohlcv_to_candles(instrument_id, timeframe, rows, self.clock.now(), tf_seconds(timeframe))
 
     async def _seed_history(self, inst: Instrument) -> None:
+        for tf in self.cfg.seed_timeframes:
+            try:
+                self.hub.seed_higher(await self.fetch_candles(inst.id, tf, limit=self.cfg.seed_candles))
+            except Exception as exc:
+                self._record_error(f"seed {tf}", exc)
         candles = await self.fetch_candles(inst.id, "1m", limit=self.cfg.history_candles)
         if candles:
             self.hub.seed_history(candles)

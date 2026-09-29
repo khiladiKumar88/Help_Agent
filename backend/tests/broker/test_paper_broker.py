@@ -489,7 +489,7 @@ async def test_ledger_is_append_only_sum(env: Env) -> None:
     from papermind.db.models import LedgerEntryRow
 
     with env.db.session() as s:
-        rows = s.scalars(select(LedgerEntryRow)).all()
+        rows = s.scalars(select(LedgerEntryRow).where(LedgerEntryRow.account == "main")).all()
         kinds = [r.kind for r in rows]
         total = sum((r.amount for r in rows), D(0))
     assert kinds[0] == str(LedgerKind.DEPOSIT)

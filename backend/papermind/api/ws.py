@@ -41,6 +41,7 @@ class WsHub:
             Topic.SYSTEM,
             Topic.DATA_STALE,
             Topic.DATA_FRESH,
+            Topic.SIGNAL,
         ):
             engine.bus.subscribe(topic, self._forwarder(topic))
         engine.bus.subscribe(Topic.TICK, self._on_tick)

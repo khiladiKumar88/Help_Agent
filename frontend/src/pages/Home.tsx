@@ -5,6 +5,7 @@ import { OrderPanel } from "@/components/OrderPanel";
 import { PositionsTable } from "@/components/PositionsTable";
 import { PriceChart } from "@/components/PriceChart";
 import { RiskFeed } from "@/components/RiskFeed";
+import { SignalsCard } from "@/components/SignalsCard";
 import { Card, CardContent } from "@/components/ui/card";
 import { api } from "@/lib/api";
 import type { ActorPnl, EquityPoint, Instrument } from "@/lib/types";
@@ -111,6 +112,7 @@ export function Home() {
           {instruments.length > 0 && (
             <OrderPanel book={book} instruments={instruments} instrumentId={instrumentId} onInstrument={setInstrumentId} />
           )}
+          <SignalsCard bookId={id} mode={book.mode} />
           <RiskFeed rows={riskRows} />
         </div>
       </div>

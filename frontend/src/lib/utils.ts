@@ -68,3 +68,21 @@ export function ageSeconds(iso: string | null | undefined, now = Date.now()): nu
   if (!iso) return null;
   return (now - new Date(iso).getTime()) / 1000;
 }
+
+/** Evenly spaced, unique tick positions for a time axis (avoids crowded/duplicate labels). */
+export function timeTicks(values: number[], count = 6): number[] {
+  if (!values.length) return [];
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  if (min === max) return [min];
+  const step = (max - min) / (count - 1);
+  return Array.from({ length: count }, (_, i) => Math.round(min + i * step));
+}
+
+/** Short axis label adapted to the visible span. */
+export function fmtAxisTime(t: number, spanMs: number): string {
+  const d = new Date(t);
+  return spanMs <= 2 * 86_400_000
+    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleDateString([], { month: "short", day: "numeric" });
+}

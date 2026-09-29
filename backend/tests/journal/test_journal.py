@@ -25,12 +25,12 @@ def test_book_created_once_with_deposit(env: Env) -> None:
 
 def test_balances_rebuilt_from_ledger_on_restart(env: Env) -> None:
     env.journal.add_ledger(BOOK_ID, Account.MAIN, LedgerKind.CHARGE, D("-0.5"))
-    env.journal.add_ledger(BOOK_ID, Account.SHADOW_BASELINE, LedgerKind.DEPOSIT, D("1000"))
+    env.journal.add_ledger(BOOK_ID, Account.SHADOW_BASELINE, LedgerKind.CHARGE, D("-1"))  # baseline has its own 1000
     from papermind.journal.service import Journal
 
     j2 = Journal(env.db, env.clock)
     assert j2.balance(BOOK_ID, Account.MAIN) == D("999.5")
-    assert j2.balance(BOOK_ID, Account.SHADOW_BASELINE) == D("1000")
+    assert j2.balance(BOOK_ID, Account.SHADOW_BASELINE) == D("999")
 
 
 def test_pnl_since_cache_tracks_new_entries(env: Env) -> None:

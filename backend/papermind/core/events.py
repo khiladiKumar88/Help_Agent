@@ -27,6 +27,8 @@ class Topic(StrEnum):
     RISK_DECISION = "risk_decision"
     BOOK = "book"
     SYSTEM = "system"
+    SIGNAL = "signal"
+    AGENT_DECISION = "agent_decision"
 
 
 Handler = Callable[[Any], Awaitable[None] | None]
@@ -44,6 +46,9 @@ class EventBus:
                 self._subs[topic].remove(handler)
 
         return _unsubscribe
+
+    def has_subscribers(self, topic: Topic) -> bool:
+        return bool(self._subs.get(topic))
 
     async def publish(self, topic: Topic, payload: Any) -> None:
         for handler in list(self._subs[topic]):

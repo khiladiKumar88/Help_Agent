@@ -1,4 +1,4 @@
-import { ageSeconds, bookId, fmtMoney, fmtNum, fmtPrice, fmtSigned, num, pnlClass, shortSymbol } from "@/lib/utils";
+import { ageSeconds, bookId, fmtAxisTime, timeTicks, fmtMoney, fmtNum, fmtPrice, fmtSigned, num, pnlClass, shortSymbol } from "@/lib/utils";
 import { isPriceStale } from "@/store/app";
 
 describe("formatters", () => {
@@ -37,5 +37,14 @@ describe("stale price detection", () => {
     expect(isPriceStale(entry, "closed", 10, 2_000)).toBe(true);
     expect(isPriceStale(entry, "open", 10, 5_000)).toBe(false);
     expect(isPriceStale(entry, "open", 10, 12_000)).toBe(true);
+  });
+});
+
+describe("time axis helpers", () => {
+  it("returns unique evenly spaced ticks", () => {
+    expect(timeTicks([0, 100, 100, 100], 5)).toEqual([0, 25, 50, 75, 100]);
+    expect(timeTicks([5, 5])).toEqual([5]);
+    expect(timeTicks([])).toEqual([]);
+    expect(fmtAxisTime(Date.UTC(2026, 0, 5), 10 * 86_400_000)).toMatch(/Jan/);
   });
 });

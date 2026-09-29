@@ -92,7 +92,8 @@ class SimulatedProvider(MarketDataProvider):
 
     def _history(self, inst: Instrument, now: datetime) -> list[Candle]:
         """Backfill closed 1m candles that end at the start price (walk backwards)."""
-        n = self.cfg.history_candles
+        # enough 1m history that the aggregated signal timeframes are warm immediately (300 x 15m)
+        n = max(self.cfg.history_candles, self.cfg.seed_candles * 15)
         end = bucket_start(now, "1m")
         price = self._prices[inst.id]
         closes = [price]

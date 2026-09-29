@@ -361,6 +361,7 @@ async def test_simulated_provider_is_deterministic() -> None:
             provider="simulated",
             symbols=["BTC/USDT:USDT"],
             history_candles=30,
+            seed_candles=2,
             simulated=SimulatedFeedConfig(start_prices={"BTC/USDT:USDT": D("65000")}),
         )
         p = SimulatedProvider(cfg, clock, hub, InstrumentRegistry())
@@ -398,3 +399,24 @@ async def test_simulated_funding_every_8h() -> None:
     await p.stop()
     assert len(got) == 1 and got[0].ts == datetime(2026, 1, 5, 8, tzinfo=UTC)
     assert SimulatedProvider._next_funding(datetime(2026, 1, 5, 23, 0, tzinfo=UTC)) == datetime(2026, 1, 6, tzinfo=UTC)
+
+
+def test_seed_timeframe_then_aggregation_dedupes() -> None:
+    b = CandleBuilder(timeframes=["5m"])
+    higher = [c1(0, "1", "9", "1", "5").model_copy(update={"timeframe": "5m"})]
+    b.seed_timeframe(higher)
+    b.seed([c1(i, "1", "2", "1", "2") for i in range(5)])  # aggregates the same 5m bucket
+    got = b.closed(BTC, "5m")
+    assert len(got) == 1 and got[0].high == D("9")  # the authoritative seeded bar wins
+
+
+async def test_ccxt_provider_seeds_signal_timeframes() -> None:
+    clock = ReplayClock(datetime(2026, 1, 5, 11, 0, tzinfo=UTC))
+    p, hub, _fake = make_provider(clock)
+    p.cfg = p.cfg.model_copy(update={"seed_timeframes": ["15m"], "seed_candles": 100})
+    await p.start()
+    try:
+        assert len(hub.builder.closed(BTC, "15m")) >= 4  # 2h of fixture 1m data served as 15m by the fake
+        assert len(hub.builder.closed(BTC, "1m")) > 0
+    finally:
+        await p.stop()

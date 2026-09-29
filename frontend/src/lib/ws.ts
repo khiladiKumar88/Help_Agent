@@ -23,6 +23,9 @@ export function handleMessage(msg: Msg): void {
     case "trade":
       s.onTrade(msg.data as TradeView);
       break;
+    case "signal":
+      s.onSignal();
+      break;
     case "risk_decision": {
       const d = msg.data as RiskDecisionRow & { book_id: string };
       s.pushRisk({ ...d, id: `${Date.now()}-${Math.random()}`, ts: new Date().toISOString() });

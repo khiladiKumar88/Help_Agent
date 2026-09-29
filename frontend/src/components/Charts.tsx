@@ -1,10 +1,11 @@
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ACTOR_COLORS } from "@/lib/seriesColors";
 import type { ActorPnl, EquityPoint } from "@/lib/types";
-import { fmtDateTime, fmtNum, fmtSigned } from "@/lib/utils";
+import { fmtAxisTime, fmtDateTime, fmtNum, fmtSigned, timeTicks } from "@/lib/utils";
 
 // Categorical slots 1-3 of the reference palette, dark-mode steps (validated on the dark card surface).
-const SERIES = { human: "#3987e5", agent: "#d95926", baseline: "#199e70" } as const;
+const SERIES = ACTOR_COLORS;
 const LABEL = { human: "You", agent: "Agent", baseline: "Baseline" } as const;
 const AXIS = { stroke: "var(--muted-foreground)", fontSize: 11, tickLine: false, axisLine: false } as const;
 const GRID = "rgba(255,255,255,0.06)";
@@ -41,7 +42,7 @@ export function EquityChart({ points, currency }: { points: EquityPoint[]; curre
           <ResponsiveContainer>
             <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
               <CartesianGrid vertical={false} stroke={GRID} />
-              <XAxis dataKey="t" type="number" scale="time" domain={["dataMin", "dataMax"]} tickFormatter={(t: number) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} {...AXIS} />
+              <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} ticks={timeTicks(data.map((d) => d.t), 5)} tickFormatter={(t: number) => fmtAxisTime(t, data[data.length - 1]!.t - data[0]!.t)} {...AXIS} />
               <YAxis domain={["auto", "auto"]} width={72} tickFormatter={(v: number) => fmtNum(v, digits)} {...AXIS} />
               <Tooltip content={<TooltipBox />} cursor={{ stroke: "var(--muted-foreground)", strokeWidth: 1 }} />
               <Line type="linear" dataKey="equity" name="Equity" stroke={SERIES.human} strokeWidth={2} dot={false} isAnimationActive={false} />
@@ -60,10 +61,13 @@ export function ActorChart({ pnl, currency }: { pnl: ActorPnl | null; currency: 
     .flatMap((a) => (pnl?.series[a] ?? []).map((p) => ({ a, t: new Date(p.ts).getTime(), v: Number(p.cum_net_pnl) })))
     .sort((x, y) => x.t - y.t);
   const cur: Record<string, number | undefined> = {};
-  const data = events.map((e) => {
+  const data: ({ t: number } & Record<string, number | undefined>)[] = [];
+  for (const e of events) {
     cur[e.a] = e.v;
-    return { t: e.t, ...cur };
-  });
+    const last = data[data.length - 1];
+    if (last && last.t === e.t) Object.assign(last, cur);
+    else data.push({ ...cur, t: e.t });
+  }
   const present = actors.filter((a) => (pnl?.series[a]?.length ?? 0) > 0);
   const digits = tickDigits([0, ...events.map((e) => e.v)]);
 
@@ -80,7 +84,7 @@ export function ActorChart({ pnl, currency }: { pnl: ActorPnl | null; currency: 
           <ResponsiveContainer>
             <LineChart data={data} margin={{ top: 8, right: 56, bottom: 0, left: 0 }}>
               <CartesianGrid vertical={false} stroke={GRID} />
-              <XAxis dataKey="t" type="number" scale="time" domain={["dataMin", "dataMax"]} tickFormatter={(t: number) => new Date(t).toLocaleDateString([], { month: "short", day: "numeric" })} {...AXIS} />
+              <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} ticks={timeTicks(data.map((d) => d.t), 5)} tickFormatter={(t: number) => fmtAxisTime(t, data[data.length - 1]!.t - data[0]!.t)} {...AXIS} />
               <YAxis width={56} domain={["auto", "auto"]} tickFormatter={(v: number) => fmtNum(v, digits)} {...AXIS} />
               <Tooltip content={<TooltipBox />} cursor={{ stroke: "var(--muted-foreground)", strokeWidth: 1 }} />
               {present.length >= 2 && <Legend iconType="plainline" wrapperStyle={{ fontSize: 12 }} />}
@@ -92,6 +96,7 @@ export function ActorChart({ pnl, currency }: { pnl: ActorPnl | null; currency: 
                   name={LABEL[a]}
                   stroke={SERIES[a]}
                   strokeWidth={2}
+                  strokeDasharray={a === "baseline" ? "5 4" : undefined}
                   dot={false}
                   connectNulls
                   isAnimationActive={false}

@@ -27,3 +27,21 @@ risk:
   daily_loss_limit_pct: 3          # % of start-of-day equity; halts the book for the day
   flatten_on_daily_loss: true
 session: null                      # 24x7
+# --- Phase 2: scanner + agent. Strategies run on closed `timeframes.signal` candles.
+# In Manual mode signals are recorded and shown; the agent only trades in Auto (Phase 3) or in
+# backtests/replays. Parameters come from each strategy's defaults unless overridden here.
+strategies:
+  - id: ema_pullback
+  - id: supertrend_flip
+  - id: vwap_reclaim
+  - id: rsi_mean_reversion
+  - id: funding_fade
+  - id: orb            # designed for India's 09:15 open; on crypto it uses the 00:00 UTC day open
+    enabled: false
+scanner:
+  cooldown_bars: 3     # min bars between two signals of the same strategy on the same instrument
+  window: 250          # closed candles fed to indicators
+baseline:              # random-entry benchmark in a separate shadow wallet (same risk + frequency)
+  enabled: true
+  seed: 7
+  max_delay_bars: 4

@@ -10,10 +10,12 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from papermind.api import routes_books, routes_market, routes_orders, routes_system, ws
+from papermind.api import routes_backtest, routes_books, routes_market, routes_orders, routes_system, ws
+from papermind.backtest.jobs import JobManager
 from papermind.core.config import Settings, load_config
 from papermind.core.logging import setup_logging
 from papermind.data.ccxt_provider import CcxtProvider
+from papermind.data.history import HistoryStore
 from papermind.engine import Engine
 
 log = logging.getLogger(__name__)
@@ -32,6 +34,8 @@ def create_app(engine_factory: Callable[[], Engine] = build_engine) -> FastAPI:
         hub = ws.WsHub(engine)
         app.state.engine = engine
         app.state.ws_hub = hub
+        app.state.history = HistoryStore(engine.cfg.data.history_db_url)
+        app.state.jobs = JobManager(engine.db)
         await engine.start()
         hub.start()
         scheduler = AsyncIOScheduler(timezone="UTC")
@@ -44,6 +48,7 @@ def create_app(engine_factory: Callable[[], Engine] = build_engine) -> FastAPI:
         finally:
             if scheduler.running:
                 scheduler.shutdown(wait=False)
+            app.state.jobs.shutdown()
             await hub.stop()
             await engine.stop()
 
@@ -54,7 +59,14 @@ def create_app(engine_factory: Callable[[], Engine] = build_engine) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    for r in (routes_system.router, routes_books.router, routes_orders.router, routes_market.router, ws.router):
+    for r in (
+        routes_system.router,
+        routes_books.router,
+        routes_orders.router,
+        routes_market.router,
+        routes_backtest.router,
+        ws.router,
+    ):
         app.include_router(r)
     return app
 

@@ -244,3 +244,19 @@ def test_jsonable() -> None:
         jdict([1])
     with pytest.raises(TypeError):
         jlist({"a": 1})
+
+
+def test_no_log_call_uses_reserved_logrecord_keys() -> None:
+    """`extra={"msg": ...}` raises KeyError inside logging — it once broke risk rejections."""
+    import ast
+
+    reserved = set(logging.LogRecord("", 0, "", 0, "", None, None).__dict__) | {"message", "asctime"}
+    pkg = Path(__file__).resolve().parents[2] / "papermind"
+    bad = []
+    for f in pkg.rglob("*.py"):
+        for node in ast.walk(ast.parse(f.read_text())):
+            if isinstance(node, ast.keyword) and node.arg == "extra" and isinstance(node.value, ast.Dict):
+                for k in node.value.keys:
+                    if isinstance(k, ast.Constant) and k.value in reserved:
+                        bad.append(f"{f.name}:{node.value.lineno} extra key '{k.value}'")
+    assert not bad, bad

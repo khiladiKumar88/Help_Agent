@@ -90,6 +90,7 @@ def make_cfg(book: dict[str, Any] | None = None, **extra: Any) -> AppConfig:
         "db_url": "sqlite://",
         "books": {b["id"]: b},
         "charges": {"crypto_test": crypto_charges(), "india_test": india_charges()},
+        "data": {"history_db_url": "sqlite://"},
     }
     raw.update(extra)
     return AppConfig.model_validate(raw)

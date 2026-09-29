@@ -6,7 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from papermind.db.base import Base, DecimalText, UTCDateTime
@@ -207,3 +207,50 @@ class SystemStateRow(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[dict[str, Any]] = mapped_column(JSON)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+
+# --------------------------------------------------------------------------- Phase 2
+
+
+class SignalRow(Base):
+    """Every candidate signal from the scanner — taken or skipped — with its full context."""
+
+    __tablename__ = "signals"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(UTCDateTime)
+    book_id: Mapped[str] = mapped_column(String(64))
+    instrument_id: Mapped[str] = mapped_column(String(128))
+    strategy_id: Mapped[str] = mapped_column(String(48))
+    params: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    timeframe: Mapped[str] = mapped_column(String(8))
+    direction: Mapped[str] = mapped_column(String(8))
+    entry_ref: Mapped[Decimal] = mapped_column(DecimalText)
+    stop_loss: Mapped[Decimal] = mapped_column(DecimalText)
+    target: Mapped[Decimal | None] = mapped_column(DecimalText, nullable=True)
+    setup: Mapped[str] = mapped_column(Text, default="")
+    regime: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    decision: Mapped[str] = mapped_column(String(16), default="pending")  # take | skip | pending
+    decision_by: Mapped[str] = mapped_column(String(16), default="")  # rules | llm | human
+    decision_reason: Mapped[str] = mapped_column(Text, default="")
+    executed: Mapped[bool] = mapped_column(Boolean, default=False)
+    trade_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    baseline_trade_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    risk_rule_blocked: Mapped[str | None] = mapped_column(String(48), nullable=True)
+
+    __table_args__ = (Index("ix_signals_book_ts", "book_id", "ts"),)
+
+
+class BacktestRunRow(Base):
+    __tablename__ = "backtest_runs"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))  # backtest | walkforward | replay | download
+    status: Mapped[str] = mapped_column(String(16))  # queued | running | done | error
+    progress: Mapped[float] = mapped_column(Float, default=0.0)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSON)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+    __table_args__ = (Index("ix_backtest_created", "created_at"),)

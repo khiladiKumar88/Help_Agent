@@ -25,3 +25,4 @@ frontend/dist/
 backups/
 
 .DS_Store
+history.db

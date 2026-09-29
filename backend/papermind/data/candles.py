@@ -1,4 +1,4 @@
-"""Candle aggregation: closed 1m candles -> 5m/15m/1h/4h/1D.
+"""Candle aggregation: closed base candles (1m live; 1m/5m/... in replays) -> higher timeframes.
 
 Only CLOSED candles are ever emitted to consumers (strategies, backtests) — the forming
 candle is exposed separately for the UI. This is what keeps signals free of lookahead.
@@ -60,8 +60,10 @@ class _Forming:
 class CandleBuilder:
     timeframes: list[str] = field(default_factory=lambda: ["5m", "15m", "1h", "4h", "1d"])
     history: int = 2000
-    close_on_tick_rollover: bool = False  # simulated feeds: ticks define the 1m candles
+    close_on_tick_rollover: bool = False  # simulated feeds: ticks define the base candles
+    base_tf: str = "1m"
     _hist: dict[tuple[str, str], deque[Candle]] = field(default_factory=dict)
+    _floats: dict[tuple[str, str], deque[tuple[float, float, float, float, float]]] = field(default_factory=dict)
     _agg: dict[tuple[str, str], _Forming] = field(default_factory=dict)
     _tick_1m: dict[str, _Forming] = field(default_factory=dict)
 
@@ -79,26 +81,46 @@ class CandleBuilder:
 
     def forming(self, instrument_id: str) -> Candle | None:
         f = self._tick_1m.get(instrument_id)
-        return f.to_candle(instrument_id, "1m", closed=False) if f else None
+        return f.to_candle(instrument_id, self.base_tf, closed=False) if f else None
 
     def _push(self, c: Candle) -> None:
-        dq = self._hist.setdefault((c.instrument_id, c.timeframe), deque(maxlen=self.history))
+        key = (c.instrument_id, c.timeframe)
+        dq = self._hist.setdefault(key, deque(maxlen=self.history))
         if dq and c.ts_open <= dq[-1].ts_open:
             return  # duplicate / out of order: ignore
         dq.append(c)
+        fq = self._floats.setdefault(key, deque(maxlen=self.history))
+        fq.append((float(c.open), float(c.high), float(c.low), float(c.close), float(c.volume)))
+
+    def closed_with_floats(
+        self, instrument_id: str, tf: str, limit: int
+    ) -> tuple[list[Candle], list[tuple[float, float, float, float, float]]]:
+        """Closed candles plus their cached float OHLCV (converted once per candle, not once per bar)."""
+        key = (instrument_id, tf)
+        dq, fq = self._hist.get(key), self._floats.get(key)
+        if not dq or not fq:
+            return [], []
+        n = min(limit, len(dq))
+        return list(dq)[-n:], list(fq)[-n:]
 
     # ---- inputs
     def on_1m_close(self, c: Candle) -> list[Candle]:
-        """Feed a CLOSED 1m candle. Returns every candle that closed as a result (1m first)."""
-        if c.timeframe != "1m" or not c.closed:
-            raise ValueError("on_1m_close expects closed 1m candles")
-        last = self.last_closed(c.instrument_id, "1m")
+        return self.on_base_close(c)
+
+    def on_base_close(self, c: Candle) -> list[Candle]:
+        """Feed a CLOSED base-timeframe candle. Returns every candle that closed as a result (base first)."""
+        if c.timeframe != self.base_tf or not c.closed:
+            raise ValueError(f"expected closed {self.base_tf} candles, got {c.timeframe}")
+        last = self.last_closed(c.instrument_id, self.base_tf)
         if last is not None and c.ts_open <= last.ts_open:
             return []
         self._push(c)
         out = [c]
-        minute_end = c.ts_open + timedelta(minutes=1)
+        minute_end = c.ts_open + timedelta(seconds=tf_seconds(self.base_tf))
+        base_s = tf_seconds(self.base_tf)
         for tf in self.timeframes:
+            if tf_seconds(tf) <= base_s or tf_seconds(tf) % base_s:
+                continue  # only strict multiples of the base timeframe are aggregated
             key = (c.instrument_id, tf)
             b0 = bucket_start(c.ts_open, tf)
             cur = self._agg.get(key)
@@ -126,13 +148,13 @@ class CandleBuilder:
 
     def on_tick(self, t: Tick) -> list[Candle]:
         """Update the forming 1m candle. If close_on_tick_rollover, returns closed candles."""
-        m0 = bucket_start(t.ts, "1m")
+        m0 = bucket_start(t.ts, self.base_tf)
         f = self._tick_1m.get(t.instrument_id)
         closed: list[Candle] = []
         vol = t.volume or ZERO
         if f is not None and m0 > f.ts_open:
             if self.close_on_tick_rollover:
-                closed = self.on_1m_close(f.to_candle(t.instrument_id, "1m", closed=True))
+                closed = self.on_base_close(f.to_candle(t.instrument_id, self.base_tf, closed=True))
             f = None
         if f is None:
             self._tick_1m[t.instrument_id] = _Forming(m0, t.ltp, t.ltp, t.ltp, t.ltp, vol, m0)
@@ -143,7 +165,16 @@ class CandleBuilder:
             f.volume += vol
         return closed
 
-    def seed(self, candles: list[Candle]) -> None:
-        """Load historical closed 1m candles (oldest first) without emitting anything."""
+    def seed_timeframe(self, candles: list[Candle]) -> None:
+        """Load authoritative closed higher-timeframe candles (oldest first), e.g. from the exchange.
+
+        Call before seed(): later aggregated duplicates of the same buckets are ignored.
+        """
         for c in candles:
-            self.on_1m_close(c)
+            if c.closed:
+                self._push(c)
+
+    def seed(self, candles: list[Candle]) -> None:
+        """Load historical closed base candles (oldest first) without emitting anything."""
+        for c in candles:
+            self.on_base_close(c)

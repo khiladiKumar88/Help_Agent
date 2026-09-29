@@ -93,6 +93,19 @@ class Database:
 
         Base.metadata.create_all(self.engine)
 
+    @property
+    def in_memory(self) -> bool:
+        return self.engine.url.database in (None, "", ":memory:")
+
+    def init_schema(self) -> None:
+        """Alembic for real databases; create_all for in-memory scratch/test databases."""
+        if self.in_memory:
+            self.create_all()
+            return
+        from papermind.db.migrate import upgrade_to_head
+
+        upgrade_to_head(self.engine)
+
     @contextmanager
     def session(self) -> Iterator[Session]:
         s = self._factory()

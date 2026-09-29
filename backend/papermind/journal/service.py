@@ -18,7 +18,7 @@ from papermind.core.config import BookConfig
 from papermind.core.ids import new_id
 from papermind.core.logging import REDACTOR
 from papermind.core.money import ZERO
-from papermind.core.types import Account, LedgerKind, TradeStatus
+from papermind.core.types import Account, LedgerKind, Signal, TradeStatus
 from papermind.db.base import Database
 from papermind.db.models import (
     AuditLogRow,
@@ -28,6 +28,7 @@ from papermind.db.models import (
     LedgerEntryRow,
     OrderRow,
     RiskDecisionRow,
+    SignalRow,
     SystemStateRow,
     TradeRow,
 )
@@ -73,6 +74,17 @@ class Journal:
             )
         self.add_ledger(cfg.id, Account.MAIN, LedgerKind.DEPOSIT, cfg.starting_capital, note="starting capital")
         self.audit("SYSTEM", f"book {cfg.id} created with {cfg.starting_capital} {cfg.currency}", book_id=cfg.id)
+
+    def ensure_account(self, cfg: BookConfig, account: Account) -> None:
+        """Shadow accounts (e.g. the random baseline) start with the same capital as the book."""
+        with self.db.session() as s:
+            exists = s.scalars(
+                select(LedgerEntryRow.id)
+                .where(LedgerEntryRow.book_id == cfg.id, LedgerEntryRow.account == str(account))
+                .limit(1)
+            ).first()
+        if exists is None:
+            self.add_ledger(cfg.id, account, LedgerKind.DEPOSIT, cfg.starting_capital, note=f"{account} capital")
 
     def book_state(self, book_id: str) -> dict[str, Any]:
         with self.db.session() as s:
@@ -276,6 +288,24 @@ class Journal:
         q = q.order_by(RiskDecisionRow.ts.desc()).limit(limit)
         with self.db.session() as s:
             return [{c.name: getattr(r, c.name) for c in RiskDecisionRow.__table__.columns} for r in s.scalars(q)]
+
+    # ------------------------------------------------------------------ signals
+    def save_signal(self, sig: Signal) -> None:
+        with self.db.session() as s:
+            s.add(SignalRow(**sig.model_dump(mode="python")))
+
+    def update_signal(self, signal_id: str, **fields: Any) -> None:
+        with self.db.session() as s:
+            row = s.get(SignalRow, signal_id)
+            if row is None:
+                return
+            for k, v in fields.items():
+                setattr(row, k, v)
+
+    def list_signals(self, book_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        q = select(SignalRow).where(SignalRow.book_id == book_id).order_by(SignalRow.ts.desc()).limit(limit)
+        with self.db.session() as s:
+            return [{c.name: getattr(r, c.name) for c in SignalRow.__table__.columns} for r in s.scalars(q)]
 
     # ------------------------------------------------------------------ equity
     def snapshot_equity(self, book_id: str, account: Account, balance: Decimal, unrealized: Decimal) -> None:

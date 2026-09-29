@@ -8,6 +8,7 @@ equity_snapshot_seconds: 60
 
 data:
   stale_after_seconds: 10          # no tick for this long => stale => no new entries (rule R004)
+  history_db_url: sqlite:///history.db   # local OHLCV cache for backtests/replays (override: PAPERMIND_HISTORY_DB_URL)
   crypto:
     provider: ccxt                 # ccxt | simulated   (override: PAPERMIND_CRYPTO_PROVIDER)
     exchange: binanceusdm          # any ccxt id; public market data only

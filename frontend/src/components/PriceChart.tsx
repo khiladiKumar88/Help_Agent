@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Segmented } from "@/components/ui/segmented";
 import { api } from "@/lib/api";
+import { cssColor } from "@/lib/cssColor";
 import type { Candle, TradeView } from "@/lib/types";
 import { fmtPrice, shortSymbol } from "@/lib/utils";
 import { isPriceStale, useApp } from "@/store/app";
@@ -21,21 +22,6 @@ import { isPriceStale, useApp } from "@/store/app";
 type Tf = "1m" | "5m" | "15m" | "1h";
 const TF_SECONDS: Record<Tf, number> = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600 };
 
-/** Resolve a CSS colour token to rgb() — the chart canvas can't parse oklch() strings. */
-function css(name: string): string {
-  const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#888888";
-  try {
-    const ctx = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
-    if (!ctx) return "#888888";
-    ctx.fillStyle = "#888888";
-    ctx.fillStyle = raw;
-    ctx.fillRect(0, 0, 1, 1);
-    const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
-    return `rgb(${r}, ${g}, ${b})`;
-  } catch {
-    return "#888888";
-  }
-}
 
 const toBar = (c: Candle) => ({
   time: (new Date(c.ts_open).getTime() / 1000) as UTCTimestamp,
@@ -68,17 +54,17 @@ export function PriceChart({ instrumentId, symbol, positions }: { instrumentId: 
     if (!el.current) return;
     const c = createChart(el.current, {
       autoSize: true,
-      layout: { background: { type: ColorType.Solid, color: "transparent" }, textColor: css("--muted-foreground"), attributionLogo: false },
+      layout: { background: { type: ColorType.Solid, color: "transparent" }, textColor: cssColor("--muted-foreground"), attributionLogo: false },
       grid: { vertLines: { visible: false }, horzLines: { color: "rgba(255,255,255,0.05)" } },
       rightPriceScale: { borderVisible: false },
       timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
       crosshair: { mode: CrosshairMode.Normal },
     });
     series.current = c.addSeries(CandlestickSeries, {
-      upColor: css("--profit"),
-      downColor: css("--loss"),
-      wickUpColor: css("--profit"),
-      wickDownColor: css("--loss"),
+      upColor: cssColor("--profit"),
+      downColor: cssColor("--loss"),
+      wickUpColor: cssColor("--profit"),
+      wickDownColor: cssColor("--loss"),
       borderVisible: false,
     });
     chart.current = c;
@@ -136,14 +122,14 @@ export function PriceChart({ instrumentId, symbol, positions }: { instrumentId: 
       const side = p.direction === "long" ? "Long" : "Short";
       if (p.avg_entry)
         lines.current.push(
-          s.createPriceLine({ price: Number(p.avg_entry), color: css("--muted-foreground"), lineWidth: 1, lineStyle: LineStyle.Solid, title: `${side} entry` }),
+          s.createPriceLine({ price: Number(p.avg_entry), color: cssColor("--muted-foreground"), lineWidth: 1, lineStyle: LineStyle.Solid, title: `${side} entry` }),
         );
       lines.current.push(
-        s.createPriceLine({ price: Number(p.current_sl), color: css("--loss"), lineWidth: 1, lineStyle: LineStyle.Dashed, title: "SL" }),
+        s.createPriceLine({ price: Number(p.current_sl), color: cssColor("--loss"), lineWidth: 1, lineStyle: LineStyle.Dashed, title: "SL" }),
       );
       if (p.target)
         lines.current.push(
-          s.createPriceLine({ price: Number(p.target), color: css("--profit"), lineWidth: 1, lineStyle: LineStyle.Dashed, title: "Target" }),
+          s.createPriceLine({ price: Number(p.target), color: cssColor("--profit"), lineWidth: 1, lineStyle: LineStyle.Dashed, title: "Target" }),
         );
     }
   }, [positions, instrumentId]);

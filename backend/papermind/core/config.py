@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     papermind_config_dir: Path = REPO_ROOT / "config"
     papermind_db_url: str | None = None
     papermind_crypto_provider: str | None = None  # override data.crypto.provider (ccxt|simulated)
+    papermind_history_db_url: str | None = None
     papermind_vault_dir: Path = REPO_ROOT / "vault"
     log_level: str = "INFO"
 
@@ -92,6 +93,7 @@ class SessionConfig(_Strict):
     """Exchange session. None on a book means 24x7 (crypto)."""
 
     timezone: str = "Asia/Kolkata"
+    market_open: time | None = None  # exchange open (e.g. 09:15); defaults to entry_start
     entry_start: time
     entry_end: time
     square_off: time | None = None
@@ -135,6 +137,25 @@ class SlippageConfig(_Strict):
     extra_ticks: int = 0  # spread model: extra adverse ticks
 
 
+class StrategySpec(_Strict):
+    id: str
+    enabled: bool = True
+    params: dict[str, float | int] = Field(default_factory=dict)
+
+
+class ScannerConfig(_Strict):
+    cooldown_bars: int = 3  # min signal-timeframe bars between signals of the same strategy+instrument
+    window: int = 250  # closed candles fed to indicators
+
+
+class BaselineConfig(_Strict):
+    """Random-entry shadow trader: same risk rules, same frequency as the agent's taken signals."""
+
+    enabled: bool = True
+    seed: int = 7
+    max_delay_bars: int = 4  # entry happens 0..N signal bars after the agent's decision (random)
+
+
 class BookConfig(_Strict):
     id: str
     market: Market
@@ -152,6 +173,9 @@ class BookConfig(_Strict):
     session: SessionConfig | None = None
     trading_day_tz: str = "UTC"
     timeframes: dict[str, str] = Field(default_factory=lambda: {"signal": "15m", "execution": "1m"})
+    strategies: list[StrategySpec] = Field(default_factory=list)
+    scanner: ScannerConfig = ScannerConfig()
+    baseline: BaselineConfig = BaselineConfig()
 
     @model_validator(mode="after")
     def _check_id(self) -> BookConfig:
@@ -215,12 +239,16 @@ class CryptoDataConfig(_Strict):
     candle_poll_seconds: float = 20.0
     funding_poll_seconds: float = 300.0
     history_candles: int = 500
+    # higher timeframes seeded directly at startup so strategies have warm-up history immediately
+    seed_timeframes: list[str] = Field(default_factory=lambda: ["15m", "1h"])
+    seed_candles: int = 300
     symbols: list[str] = Field(default_factory=list)
     simulated: SimulatedFeedConfig = SimulatedFeedConfig()
 
 
 class DataConfig(_Strict):
     stale_after_seconds: float = 10.0
+    history_db_url: str = "sqlite:///history.db"  # local OHLCV cache for backtests / replays
     crypto: CryptoDataConfig = CryptoDataConfig()
 
 
@@ -282,6 +310,8 @@ def load_config(settings: Settings | None = None) -> AppConfig:
     raw["books"] = books
     if settings.papermind_db_url:
         raw["db_url"] = settings.papermind_db_url
+    if settings.papermind_history_db_url:
+        raw.setdefault("data", {})["history_db_url"] = settings.papermind_history_db_url
     if settings.papermind_crypto_provider:
         raw.setdefault("data", {}).setdefault("crypto", {})["provider"] = settings.papermind_crypto_provider
 

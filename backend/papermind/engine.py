@@ -1,4 +1,8 @@
-"""Engine: wires config, clock, DB, market data, risk and the paper broker together."""
+"""Engine: wires config, clock, DB, market data, scanner, agent, risk and the paper broker together.
+
+The SAME Engine class runs live (RealClock + live provider) and in replays/backtests
+(ReplayClock + HistoricalReplayProvider). Only the clock, provider and options differ.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +10,9 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from papermind.broker.paper_broker import PaperBroker
@@ -23,6 +30,9 @@ from papermind.instruments.registry import InstrumentRegistry
 from papermind.journal.service import Journal
 from papermind.risk.manager import RiskManager
 from papermind.risk.session import in_entry_window
+from papermind.scanner.agent import AgentExecutor, BaselineAgent, Decider
+from papermind.scanner.scanner import FundingFn, Scanner
+from papermind.strategies.base import Strategy
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +46,18 @@ def default_provider_factory(engine: Engine) -> MarketDataProvider:
     return CcxtProvider(crypto, engine.clock, engine.hub, engine.registry)
 
 
+@dataclass
+class EngineOptions:
+    drive_timers: bool = True  # False in replays: the replay provider steps the timers itself
+    force_execute: bool = False  # agent trades regardless of book mode (backtests / replays)
+    trading_starts_at: datetime | None = None  # no signals before this (backtest warm-up)
+    base_tf: str = "1m"
+    persist_candles: bool = True
+    funding_fn: FundingFn | None = None
+    strategies: dict[str, list[Strategy]] | None = None
+    decider: Decider | None = None
+
+
 class Engine:
     def __init__(
         self,
@@ -44,18 +66,23 @@ class Engine:
         clock: Clock | None = None,
         provider_factory: ProviderFactory = default_provider_factory,
         timer_interval: float = 1.0,
+        options: EngineOptions | None = None,
     ) -> None:
+        self.options = opts = options or EngineOptions()
         self.cfg = cfg
         self.settings = settings or Settings()
         self.clock = clock or RealClock()
         self.bus = EventBus()
         self.db = Database(cfg.db_url)
-        self.db.create_all()
+        self.db.init_schema()
         self.journal = Journal(self.db, self.clock)
         self.registry = InstrumentRegistry(self.db)
         self.market = MarketState()
-        self.builder = CandleBuilder(close_on_tick_rollover=cfg.data.crypto.provider == "simulated")
-        self.hub = MarketHub(self.clock, self.bus, self.market, self.builder, self.db)
+        self.builder = CandleBuilder(
+            close_on_tick_rollover=cfg.data.crypto.provider == "simulated" and opts.drive_timers,
+            base_tf=opts.base_tf,
+        )
+        self.hub = MarketHub(self.clock, self.bus, self.market, self.builder, self.db if opts.persist_candles else None)
         self.watchdog = StalenessWatchdog(self.clock, self.bus, self.market, cfg.data.stale_after_seconds)
         self.broker = PaperBroker(cfg, self.clock, self.bus, self.journal, self.registry, self.market, RiskManager())
         self.provider = provider_factory(self)
@@ -64,6 +91,23 @@ class Engine:
         self.started = False
         self.bus.subscribe(Topic.TICK, self.broker.on_tick)
         self.bus.subscribe(Topic.FUNDING, self.broker.on_funding)
+        self.scanner = Scanner(
+            cfg,
+            self.clock,
+            self.bus,
+            self.registry,
+            self.builder,
+            self.journal,
+            funding_fn=opts.funding_fn or self._live_funding,
+            strategies=opts.strategies,
+            trading_starts_at=opts.trading_starts_at,
+        )
+        self.executor = AgentExecutor(self.bus, self.broker, self.journal, opts.decider, opts.force_execute)
+        self.baseline = BaselineAgent(self.bus, self.broker, self.journal, self.clock)
+
+    def _live_funding(self, instrument_id: str, _ts: datetime) -> Decimal | None:
+        info = self.market.funding.get(instrument_id)
+        return info.rate if info else None
 
     async def start(self) -> None:
         self.registry.load_from_db()
@@ -74,7 +118,8 @@ class Engine:
             log.exception("market data provider failed to start")
             self.journal.audit("DATA", f"provider failed to start: {exc}", level="ERROR")
         self.watchdog.watch(self.provider.instrument_ids())
-        self._timer = asyncio.create_task(self._timer_loop(), name="engine-timer")
+        if self.options.drive_timers:
+            self._timer = asyncio.create_task(self._timer_loop(), name="engine-timer")
         self.started = True
         self.journal.audit("SYSTEM", "engine started", payload={"provider": self.provider.name})
 
@@ -86,11 +131,14 @@ class Engine:
         await self.provider.stop()
         self.started = False
 
+    async def run_timers_once(self) -> None:
+        await self.watchdog.check()
+        await self.broker.on_timer()
+
     async def _timer_loop(self) -> None:
         while True:
             try:
-                await self.watchdog.check()
-                await self.broker.on_timer()
+                await self.run_timers_once()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -127,4 +175,5 @@ class Engine:
             "books": {b: {"status": self.agent_status(b), "mode": self.broker.mode(b)} for b in self.cfg.books},
             "llm": {"provider": None, "calls_today": 0, "daily_budget": None, "note": "LLM analyst arrives in Phase 3"},
             "secrets": self.settings.secrets_status(),
+            "scanner": {"signals": self.scanner.signals_emitted, "errors": self.scanner.errors},
         }

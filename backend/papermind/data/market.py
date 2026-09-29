@@ -78,18 +78,24 @@ class MarketHub:
             await self._emit_candle(c)
 
     async def on_1m_candle(self, candle: Candle) -> None:
-        for c in self.builder.on_1m_close(candle):
+        await self.on_base_candle(candle)
+
+    async def on_base_candle(self, candle: Candle) -> None:
+        for c in self.builder.on_base_close(candle):
             await self._emit_candle(c)
 
     async def on_funding(self, ev: FundingEvent) -> None:
         await self.bus.publish(Topic.FUNDING, ev)
+
+    def seed_higher(self, candles: list[Candle]) -> None:
+        self.builder.seed_timeframe(candles)
 
     def seed_history(self, candles: list[Candle]) -> None:
         self.builder.seed(candles)
         self._persist(candles)
 
     async def _emit_candle(self, c: Candle) -> None:
-        if c.timeframe == "1m":
+        if c.timeframe == self.builder.base_tf:
             self._persist([c])
         await self.bus.publish(Topic.CANDLE, c)
 

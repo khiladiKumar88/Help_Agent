@@ -65,6 +65,7 @@ class OrderPurpose(StrEnum):
     KILL = "kill"
     EXPIRY = "expiry"
     DAILY_LOSS = "daily_loss"
+    END_OF_TEST = "end_of_test"
 
 
 class OrderStatus(StrEnum):
@@ -90,6 +91,7 @@ class ExitReason(StrEnum):
     KILL_SWITCH = "kill_switch"
     EXPIRY = "expiry"
     DAILY_LOSS = "daily_loss"
+    END_OF_TEST = "end_of_test"
 
 
 class Liquidity(StrEnum):
@@ -258,3 +260,31 @@ def trading_date(ts: datetime, tz: str) -> date:
     from zoneinfo import ZoneInfo
 
     return ts.astimezone(ZoneInfo(tz)).date()
+
+
+class Signal(BaseModel):
+    """A candidate trade from a strategy on a closed candle. Stored whether taken or skipped."""
+
+    id: str
+    ts: datetime
+    book_id: str
+    instrument_id: str
+    strategy_id: str
+    params: dict[str, float | int] = Field(default_factory=dict)
+    timeframe: str
+    direction: Direction
+    entry_ref: Decimal
+    stop_loss: Decimal
+    target: Decimal | None = None
+    setup: str = ""
+    regime: dict[str, object] = Field(default_factory=dict)
+    context: dict[str, object] = Field(default_factory=dict)
+
+
+class Decision(BaseModel):
+    """Agent verdict on a signal. Phase 2: rules-only; Phase 3 adds the LLM analyst."""
+
+    take: bool
+    by: str  # rules | llm | human
+    reason: str
+    confidence: int | None = None

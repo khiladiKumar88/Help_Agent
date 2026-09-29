@@ -51,12 +51,14 @@ from papermind.risk.session import day_start, next_day_start, past_square_off
 log = logging.getLogger(__name__)
 
 KILL_SWITCH_KEY = "kill_switch"
+SHADOW_HALTS_KEY = "shadow_halts"
 _EXIT_PURPOSE = {
     ExitReason.MANUAL: OrderPurpose.EXIT,
     ExitReason.SQUARE_OFF: OrderPurpose.SQUARE_OFF,
     ExitReason.KILL_SWITCH: OrderPurpose.KILL,
     ExitReason.EXPIRY: OrderPurpose.EXPIRY,
     ExitReason.DAILY_LOSS: OrderPurpose.DAILY_LOSS,
+    ExitReason.END_OF_TEST: OrderPurpose.END_OF_TEST,
 }
 _EXIT_REASON_BY_PURPOSE = {
     OrderPurpose.STOP: ExitReason.STOP_LOSS,
@@ -103,6 +105,7 @@ class PaperBroker:
         self._kill = False
         self._last_push: dict[str, datetime] = {}
         self._last_snapshot: dict[str, datetime] = {}
+        self._shadow_halts: dict[tuple[str, str], tuple[str, datetime]] = {}  # (book, account) -> (reason, until)
         self._lock = asyncio.Lock()
 
     # ================================================================== lifecycle
@@ -110,6 +113,11 @@ class PaperBroker:
         for book in self.cfg.books.values():
             self.journal.ensure_book(book)
             self._book_state[book.id] = self.journal.book_state(book.id)
+            for acct in self.accounts(book.id)[1:]:
+                self.journal.ensure_account(book, acct)
+        for key, (reason, until) in (self.journal.get_state(SHADOW_HALTS_KEY) or {}).items():
+            b, a = key.split("|", 1)
+            self._shadow_halts[(b, a)] = (reason, datetime.fromisoformat(until))
         trades, orders = self.journal.load_active()
         self._trades = {t.id: t for t in trades}
         self._orders = {o.id: o for o in orders}
@@ -135,9 +143,19 @@ class PaperBroker:
     def mode(self, book_id: str) -> str:
         return str(self._book_state[book_id]["mode"])
 
-    def halted(self, book_id: str) -> tuple[bool, str | None]:
-        st = self._book_state[book_id]
-        return bool(st["halted"]), st["halt_reason"]
+    def accounts(self, book_id: str) -> list[Account]:
+        """Accounts that exist for a book: main, plus the baseline shadow when enabled."""
+        book = self.book(book_id)
+        return [Account.MAIN, Account.SHADOW_BASELINE] if book.baseline.enabled else [Account.MAIN]
+
+    def halted(self, book_id: str, account: Account = Account.MAIN) -> tuple[bool, str | None]:
+        if account is Account.MAIN:
+            st = self._book_state[book_id]
+            return bool(st["halted"]), st["halt_reason"]
+        h = self._shadow_halts.get((book_id, str(account)))
+        if h is not None and self.clock.now() < h[1]:
+            return True, h[0]
+        return False, None
 
     def active_trades(self, book_id: str | None = None, account: Account | None = None) -> list[Trade]:
         return [
@@ -212,7 +230,7 @@ class PaperBroker:
         book = self.book(req.book_id)
         inst = self.registry.get(req.instrument_id) if req.instrument_id in self.registry else None
         charges = self._charges(book)
-        halted, reason = self.halted(book.id)
+        halted, reason = self.halted(book.id, req.account)
 
         def round_trip(qty: Decimal, entry: Decimal, exit_: Decimal) -> Decimal:
             assert inst is not None
@@ -294,7 +312,9 @@ class PaperBroker:
                 ),
             )
             if not decision.approved:
-                log.info("order rejected by risk", extra={"rule": decision.failed_rule_id, "msg": decision.message})
+                log.info(
+                    "order rejected by risk", extra={"rule": decision.failed_rule_id, "risk_message": decision.message}
+                )
                 self.journal.audit(
                     "RISK",
                     f"rejected {req.direction} {req.qty} {req.instrument_id}: "
@@ -517,18 +537,19 @@ class PaperBroker:
                 ),
                 key=lambda o: (0 if o.purpose is OrderPurpose.STOP else 1, o.created_at),
             )
-            touched: set[str] = set()
+            touched: set[tuple[str, Account]] = set()
             for o in orders:
                 if o.status is not OrderStatus.PENDING or tick.ts <= o.created_at:
                     continue  # cancelled by an OCO sibling, or not yet "next tick"
                 if await self._process_order(o, tick):
-                    touched.add(o.book_id)  # realized P&L changed: re-check daily loss
+                    touched.add((o.book_id, o.account))  # realized P&L changed: re-check daily loss
             for t in self.active_trades():
                 if t.instrument_id == tick.instrument_id and t.status is TradeStatus.OPEN:
                     self._update_excursions_and_trail(t, tick)
-                    touched.add(t.book_id)
-            for book_id in touched:
-                await self._check_daily_loss(self.book(book_id))
+                    touched.add((t.book_id, t.account))
+            for book_id, account in sorted(touched):
+                await self._check_daily_loss(self.book(book_id), account)
+            for book_id in sorted({b for b, _ in touched}):
                 await self._push_book(book_id, throttle=True)
 
     async def _process_order(self, o: Order, tick: Tick) -> bool:
@@ -740,36 +761,46 @@ class PaperBroker:
                         await self._close_now(t, ExitReason.EXPIRY, settle)
 
     def _snapshot(self, book_id: str) -> None:
-        gross, _ = self.unrealized(book_id, Account.MAIN)
-        self.journal.snapshot_equity(book_id, Account.MAIN, self.journal.balance(book_id, Account.MAIN), gross)
+        for acct in self.accounts(book_id):
+            gross, _ = self.unrealized(book_id, acct)
+            self.journal.snapshot_equity(book_id, acct, self.journal.balance(book_id, acct), gross)
         self._last_snapshot[book_id] = self.clock.now()
 
-    async def _check_daily_loss(self, book: BookConfig) -> None:
-        halted, _ = self.halted(book.id)
+    async def _check_daily_loss(self, book: BookConfig, account: Account = Account.MAIN) -> None:
+        """Each account has its own daily loss limit: the baseline can never halt your book (or vice versa)."""
+        halted, _ = self.halted(book.id, account)
         if halted:
             return
-        limit = self.build_limit(book)
+        limit = self.build_limit(book, account)
         if limit is None:
             return
-        pnl = self.day_pnl(book, Account.MAIN)
+        pnl = self.day_pnl(book, account)
         if pnl > -limit:
             return
         until = next_day_start(self.clock.now(), book.trading_day_tz)
-        self._set_halt(book.id, True, f"daily loss limit hit ({pnl:.2f} <= -{limit:.2f})", until)
-        for t in self.active_trades(book.id, Account.MAIN):
+        reason = f"daily loss limit hit ({pnl:.2f} <= -{limit:.2f})"
+        if account is Account.MAIN:
+            self._set_halt(book.id, True, reason, until)
+        else:
+            self._shadow_halts[(book.id, str(account))] = (reason, until)
+            self.journal.set_state(
+                SHADOW_HALTS_KEY, {f"{b}|{a}": [r, u.isoformat()] for (b, a), (r, u) in self._shadow_halts.items()}
+            )
+            self.journal.audit("RISK", f"{account} halted: {reason}", book_id=book.id, level="WARNING")
+        for t in self.active_trades(book.id, account):
             if t.status is TradeStatus.PENDING:
                 await self._cancel_pending_entry(t, "daily loss limit")
             elif book.risk.flatten_on_daily_loss:
                 await self._request_exit(t, ExitReason.DAILY_LOSS)
         await self._push_book(book.id)
 
-    def build_limit(self, book: BookConfig) -> Decimal | None:
+    def build_limit(self, book: BookConfig, account: Account = Account.MAIN) -> Decimal | None:
         r = book.risk
         caps = []
         if r.daily_loss_limit_abs is not None:
             caps.append(r.daily_loss_limit_abs)
         if r.daily_loss_limit_pct is not None:
-            caps.append(self.day_start_equity(book, Account.MAIN) * r.daily_loss_limit_pct / PCT)
+            caps.append(self.day_start_equity(book, account) * r.daily_loss_limit_pct / PCT)
         return min(caps) if caps else None
 
     def _set_halt(self, book_id: str, halted: bool, reason: str | None, until: datetime | None) -> None:
@@ -780,6 +811,18 @@ class PaperBroker:
         self.book(book_id)
         self.journal.set_book_mode(book_id, mode)
         self._book_state[book_id]["mode"] = mode
+
+    async def flatten_all(self, reason: ExitReason) -> int:
+        """Close every active trade immediately at the last price (end of a backtest/replay)."""
+        async with self._lock:
+            n = 0
+            for t in list(self.active_trades()):
+                if t.status is TradeStatus.PENDING:
+                    await self._cancel_pending_entry(t, str(reason))
+                else:
+                    await self._close_now(t, reason)
+                    n += 1
+            return n
 
     # ================================================================== kill switch
     async def engage_kill_switch(self, reason: str) -> dict[str, Any]:
@@ -882,10 +925,13 @@ class PaperBroker:
         )
 
     async def _publish_trade(self, t: Trade) -> None:
-        await self.bus.publish(Topic.TRADE, self.trade_view(t))
+        if self.bus.has_subscribers(Topic.TRADE):
+            await self.bus.publish(Topic.TRADE, self.trade_view(t))
         await self._push_book(t.book_id)
 
     async def _push_book(self, book_id: str, throttle: bool = False) -> None:
+        if not self.bus.has_subscribers(Topic.BOOK):
+            return  # nobody listening (e.g. a backtest): skip the expensive summary
         now = self.clock.now()
         last = self._last_push.get(book_id)
         if throttle and last is not None and (now - last).total_seconds() < 0.5:

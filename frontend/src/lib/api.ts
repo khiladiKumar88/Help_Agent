@@ -1,5 +1,11 @@
 import type {
   ActorPnl,
+  Coverage,
+  Dataset,
+  JobBody,
+  JobRow,
+  SignalRow,
+  StrategyInfo,
   BookSummary,
   Candle,
   EquityPoint,
@@ -73,4 +79,20 @@ export const api = {
       json("POST", { confirm: true, reason }),
     ),
   releaseKillSwitch: () => request<{ engaged: boolean }>("/api/system/kill-switch/release", json("POST")),
+  // Phase 2
+  bookConfig: (id: string) =>
+    request<{ book: { instruments: string[]; timeframes: { signal: string; execution?: string } } }>(`/api/books/${id}/config`),
+  signals: (bookId: string, limit = 30) => request<SignalRow[]>(`/api/books/${bookId}/signals?limit=${limit}`),
+  strategies: () => request<StrategyInfo[]>("/api/strategies"),
+  datasets: () => request<Dataset[]>("/api/history/datasets"),
+  coverage: (exchange: string, symbol: string, timeframe: string) =>
+    request<Coverage>(
+      `/api/history/coverage?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&timeframe=${timeframe}`,
+    ),
+  download: (body: { exchange: string; symbol: string; timeframe: string; start: string; repair_gaps?: boolean }) =>
+    request<{ run_id: string }>("/api/history/download", json("POST", body)),
+  startJob: (body: JobBody) => request<{ run_id: string }>("/api/backtests", json("POST", body)),
+  jobs: (limit = 20) => request<JobRow[]>(`/api/backtests?limit=${limit}`),
+  job: (id: string) => request<JobRow>(`/api/backtests/${id}`),
+  cancelJob: (id: string) => request<{ cancelled: boolean }>(`/api/backtests/${id}/cancel`, json("POST")),
 };

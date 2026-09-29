@@ -181,3 +181,170 @@ export interface OrderForm {
   target?: string;
   leverage: string;
 }
+
+// ---------------------------------------------------------------- Phase 2
+
+export interface StrategyInfo {
+  id: string;
+  name: string;
+  description: string;
+  markets: string[];
+  default_params: Record<string, number>;
+  param_grid: Record<string, number[]>;
+  grid_size: number;
+}
+
+export interface Coverage {
+  exchange: string;
+  symbol: string;
+  timeframe: string;
+  first: string | null;
+  last: string | null;
+  bars: number;
+  expected_bars: number;
+  missing_bars: number;
+  complete_pct: number;
+  gaps: { start: string; end: string; missing_bars: number }[];
+}
+
+export interface Dataset {
+  exchange: string;
+  symbol: string;
+  timeframe: string;
+  first: string;
+  last: string;
+  bars: number;
+}
+
+export interface MetricsRow {
+  trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  net_profit: string;
+  fees: string;
+  funding: string;
+  avg_r: number | null;
+  profit_factor: number | null;
+  max_drawdown: string;
+  max_drawdown_pct: number;
+  return_pct: number;
+  sharpe: number | null;
+  best_trade: string;
+  worst_trade: string;
+  avg_hold_minutes: number | null;
+}
+
+export interface BuyHoldRow {
+  net_profit: string;
+  return_pct: number;
+  fees: string;
+  max_drawdown_pct: number;
+}
+
+export interface Verdict {
+  meaningful: boolean;
+  min_trades: number;
+  beat_baseline: boolean | null;
+  beat_buy_hold: boolean;
+}
+
+export interface BtTrade {
+  id: string;
+  actor: "agent" | "baseline" | "human";
+  direction: "long" | "short";
+  qty: string;
+  entry: string | null;
+  exit: string | null;
+  stop: string;
+  target: string | null;
+  opened_at: string | null;
+  closed_at: string | null;
+  net_pnl: string;
+  fees: string;
+  r: string | null;
+  exit_reason: string | null;
+  note: string;
+}
+
+export interface FoldRow {
+  fold: number;
+  train: [string, string];
+  test: [string, string];
+  params: Record<string, number>;
+  why: string;
+  oos_trades: number;
+  oos_net_profit: string;
+  oos_avg_r: number | null;
+  baseline_net_profit: string;
+  baseline_avg_r: number | null;
+}
+
+export interface SignalRow {
+  id: string;
+  ts: string;
+  strategy_id: string;
+  direction: "long" | "short";
+  entry_ref: string;
+  stop_loss: string;
+  target: string | null;
+  setup: string;
+  decision: string;
+  executed: boolean;
+  risk_rule_blocked: string | null;
+  regime: string | Record<string, unknown> | null;
+}
+
+export interface BacktestResult {
+  kind: "backtest" | "walkforward" | "replay";
+  label: string;
+  approximate: boolean;
+  currency: string;
+  instrument: string;
+  period: { start: string; end: string };
+  data: { bars: number; expected_bars: number };
+  agent: MetricsRow;
+  baseline: MetricsRow;
+  buy_hold: BuyHoldRow | null;
+  verdict: Verdict;
+  summary: string;
+  equity: { agent: { t: string; v: string }[]; baseline: { t: string; v: string }[] };
+  trades: BtTrade[];
+  signals: number;
+  candles: { t: string; o: string; h: string; l: string; c: string }[];
+  folds?: FoldRow[];
+  grid_size?: number;
+  strategies?: string[];
+  signal_list?: SignalRow[];
+}
+
+export interface JobRow {
+  id: string;
+  kind: "backtest" | "walkforward" | "replay" | "download";
+  status: "queued" | "running" | "done" | "error" | "cancelled";
+  progress: number;
+  message: string | null;
+  spec: Record<string, unknown>;
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
+  summary?: string | null;
+  verdict?: Verdict | null;
+  result?: (BacktestResult & { summary: string }) | { summary: string } | null;
+}
+
+export interface JobBody {
+  kind: "backtest" | "walkforward" | "replay";
+  book_id: string;
+  exchange: string;
+  symbol: string;
+  base_tf: string;
+  strategy_id?: string;
+  start?: string;
+  end?: string;
+  day?: string;
+  train_days?: number;
+  test_days?: number;
+  min_trades?: number;
+  speed?: number;
+}

@@ -22,6 +22,7 @@ interface AppState {
   lastCandle: Record<string, Candle>;
   riskFeed: RiskDecisionRow[];
   tradeVersion: number; // bumps when any trade changes (triggers refetch of history charts)
+  signalVersion: number; // bumps on every scanner signal
   setConn: (c: ConnState, reconnectInMs?: number | null) => void;
   setSelection: (p: Partial<Pick<AppState, "market" | "segment" | "style">>) => void;
   setStatus: (s: SystemStatus) => void;
@@ -29,6 +30,7 @@ interface AppState {
   onTick: (t: Tick) => void;
   onCandle: (c: Candle) => void;
   onTrade: (t: TradeView) => void;
+  onSignal: () => void;
   setRiskFeed: (rows: RiskDecisionRow[]) => void;
   pushRisk: (row: RiskDecisionRow) => void;
   touch: () => void;
@@ -47,6 +49,7 @@ export const useApp = create<AppState>((set) => ({
   lastCandle: {},
   riskFeed: [],
   tradeVersion: 0,
+  signalVersion: 0,
   setConn: (conn, reconnectInMs = null) => set({ conn, reconnectInMs }),
   setSelection: (p) => set(p),
   setStatus: (status) => set({ status }),
@@ -55,6 +58,7 @@ export const useApp = create<AppState>((set) => ({
   onCandle: (c) =>
     c.timeframe === "1m" ? set((s) => ({ lastCandle: { ...s.lastCandle, [c.instrument_id]: c } })) : undefined,
   onTrade: () => set((s) => ({ tradeVersion: s.tradeVersion + 1 })),
+  onSignal: () => set((s) => ({ signalVersion: s.signalVersion + 1 })),
   setRiskFeed: (riskFeed) => set({ riskFeed }),
   pushRisk: (row) => set((s) => ({ riskFeed: [row, ...s.riskFeed].slice(0, 50) })),
   touch: () => set({ lastMessageAt: Date.now() }),
