@@ -111,6 +111,19 @@ def test_manual_trade_lifecycle_with_live_pnl_after_fees(client: TestClient) -> 
 
     prev = client.post("/api/orders/preview", json=ORDER).json()
     assert prev["decision"]["approved"] is True and prev["max_qty_by_risk"] == "0.009"
+    # the preview explains the est_entry -> fill gap: 65000 ask + 2 bps = 65013 (asserted below)
+    assert prev["est_entry"] == "65000"
+    assert prev["slippage"] == {
+        "model": "bps",
+        "bps": "2",
+        "est_spread_bps": "2",
+        "extra_ticks": 0,
+        "reference_price": "65000",
+        "reference_kind": "ask",
+        "est_fill": "65013",
+        "per_unit": "13",
+        "cost": "0.065",
+    }
 
     r = client.post("/api/orders", json=ORDER).json()
     assert r["approved"] is True and r["trade"]["status"] == "pending" and r["trade"]["actor"] == "human"

@@ -22,10 +22,20 @@ MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
 BASELINE = "0001_phase1"
 
 
+def _ini_escape(value: str) -> str:
+    """Escape a literal value for Alembic's ConfigParser (BasicInterpolation eats bare `%`).
+
+    SQLAlchemy percent-encodes Windows paths when rendering a URL
+    (``sqlite:///C%3A%5C...``), and any path may contain ``%``. ConfigParser reads
+    ``%%`` back as a single ``%``, so escaping round-trips exactly.
+    """
+    return value.replace("%", "%%")
+
+
 def alembic_config(url: str) -> Config:
     cfg = Config()
-    cfg.set_main_option("script_location", str(MIGRATIONS_DIR))
-    cfg.set_main_option("sqlalchemy.url", url)
+    cfg.set_main_option("script_location", _ini_escape(str(MIGRATIONS_DIR)))
+    cfg.set_main_option("sqlalchemy.url", _ini_escape(url))
     return cfg
 
 

@@ -4,6 +4,7 @@ import asyncio
 import math
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -224,8 +225,38 @@ async def test_synthetic_feed_lets_the_broker_trade_an_option() -> None:
 # ------------------------------------------------------------------ jobs
 
 
-def test_job_manager_success_error_cancel_and_restart() -> None:
+def test_a_finished_job_never_reports_stale_live_progress() -> None:
+    """`_run` writes the terminal status before it clears the live cache, so `wait()` can return
+    while a half-done fraction is still cached. A finished job must report the stored progress."""
     db = Database("sqlite://")
+    db.create_all()
+    jobs = JobManager(db)
+    with db.session() as s:
+        s.add(
+            BacktestRunRow(
+                id="run_done", kind="backtest", status="done", progress=1.0, spec={}, created_at=T0, result={}
+            )
+        )
+    jobs._live["run_done"] = (0.5, "half")  # the race: cache not cleared yet
+
+    row = jobs.get("run_done")
+    assert row is not None and row["progress"] == 1.0 and row["message"] is None
+    assert jobs.list()[0]["progress"] == 1.0
+
+    # a job that is still running does report its live fraction
+    with db.session() as s:
+        s.add(BacktestRunRow(id="run_going", kind="backtest", status="running", progress=0.0, spec={}, created_at=T0))
+    jobs._live["run_going"] = (0.5, "half")
+    going = jobs.get("run_going")
+    assert going is not None and going["progress"] == 0.5 and going["message"] == "half"
+
+
+def test_job_manager_success_error_cancel_and_restart(tmp_path: Path) -> None:
+    # A FILE database, not "sqlite://": in-memory SQLite uses a StaticPool, i.e. one connection
+    # shared by every thread, so the job worker and this thread would interleave transactions on
+    # it and reads could observe a half-applied row. Production always runs on a file database,
+    # where each thread gets its own pooled connection.
+    db = Database(f"sqlite:///{tmp_path / 'jobs.db'}")
     db.create_all()
     jobs = JobManager(db)
 

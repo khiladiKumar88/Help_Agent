@@ -131,6 +131,19 @@ export interface RiskDecisionRow {
   message: string;
 }
 
+/** What the book's slippage model assumes, so est_entry vs the real fill is explainable. */
+export interface SlippagePreview {
+  model: "bps" | "spread";
+  bps: string;
+  est_spread_bps: string;
+  extra_ticks: number;
+  reference_price: string;
+  reference_kind: string; // ask | bid | ltp_half_spread
+  est_fill: string;
+  per_unit: string;
+  cost: string;
+}
+
 export interface Preview {
   decision: RiskDecision;
   est_entry: string | null;
@@ -143,6 +156,7 @@ export interface Preview {
   est_round_trip_charges: string;
   max_risk_allowed: string | null;
   max_qty_by_risk: string;
+  slippage: SlippagePreview | null;
   stale: boolean;
 }
 

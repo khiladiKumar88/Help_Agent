@@ -86,3 +86,17 @@ export function fmtAxisTime(t: number, spanMs: number): string {
     ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
     : d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
+
+/** Plain-English note for the slippage the preview assumed, e.g. "2 bps worse than the ask". */
+export function slippageNote(s: {
+  model: string;
+  bps: string;
+  extra_ticks: number;
+  est_spread_bps: string;
+  reference_kind: string;
+}): string {
+  const ref =
+    s.reference_kind === "ask" ? "the ask" : s.reference_kind === "bid" ? "the bid" : `LTP ± ½ spread (${s.est_spread_bps} bps)`;
+  const amount = s.model === "bps" ? `${num(s.bps) ?? 0} bps` : `${s.extra_ticks} tick${s.extra_ticks === 1 ? "" : "s"}`;
+  return `${amount} worse than ${ref}`;
+}

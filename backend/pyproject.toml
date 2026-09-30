@@ -43,7 +43,11 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "ASYNC"]
 ignore = ["B008", "RUF012", "RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
-python_version = "3.11"
+# No `python_version`: mypy then checks against the interpreter it runs on, which is the one
+# whose dependencies are actually installed. Pinning it to the 3.11 floor breaks on newer
+# interpreters, because uv resolves numpy 2.5.x there and its stubs use PEP 695 `type`
+# statements that mypy refuses to parse under a 3.11 target. `requires-python = ">=3.11"`
+# still holds (3.11 resolves numpy 2.4.x); ruff's target-version guards the syntax floor.
 strict = true
 plugins = ["pydantic.mypy"]
 exclude = ["tests/"]

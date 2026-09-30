@@ -475,6 +475,51 @@ async def test_preview_contains_sizing(env: Env) -> None:
     assert p["reward_risk"] is not None
 
 
+async def test_preview_explains_the_slippage_gap_to_the_real_fill(env: Env) -> None:
+    """The preview's slippage block must account for est_entry -> actual fill, exactly."""
+    await env.tick("65000", **QUOTE)
+    req = env.req(target="67000")
+    p = env.broker.preview(req)
+    s = p["slippage"]
+    assert s["model"] == "bps" and s["bps"] == "2" and s["est_spread_bps"] == "2"
+    assert s["reference_kind"] == "ask" and s["reference_price"] == "65000" == p["est_entry"]
+    assert s["est_fill"] == "65013"  # 65000 * 1.0002
+    assert s["per_unit"] == "13"
+    assert D(s["cost"]) == D("13") * D("0.005")  # per unit x qty x contract size (1)
+
+    # and that estimate is what the broker actually fills at on the next tick
+    decision, trade = await env.broker.submit(req)
+    assert decision.approved and trade is not None
+    await env.tick("65000", **QUOTE)
+    assert env.broker.trade_view(trade)["avg_entry"] == s["est_fill"]
+
+
+async def test_preview_slippage_follows_the_books_config(env: Env) -> None:
+    cfg = make_cfg(book_dict() | {"slippage": {"model": "bps", "bps": "10", "est_spread_bps": "4"}})
+    e = build_env(cfg)
+    await e.tick("65000", **QUOTE)
+    s = e.broker.preview(e.req())["slippage"]
+    assert s["bps"] == "10" and s["est_spread_bps"] == "4"
+    assert s["est_fill"] == "65065"  # 65000 * 1.001
+
+
+async def test_preview_slippage_on_a_short_uses_the_bid(env: Env) -> None:
+    await env.tick("65000", **QUOTE)
+    s = env.broker.preview(env.req(direction=Direction.SHORT, sl="66000"))["slippage"]
+    assert s["reference_kind"] == "bid" and s["reference_price"] == "64999.9"
+    assert s["est_fill"] == "64986.9"
+
+
+async def test_preview_slippage_is_none_without_a_tick(env: Env) -> None:
+    assert env.broker.preview(env.req())["slippage"] is None
+
+
+async def test_preview_slippage_caps_a_resting_limit_at_its_limit(env: Env) -> None:
+    await env.tick("65000", **QUOTE)
+    s = env.broker.preview(env.req(order_type=OrderType.LIMIT, limit_price=D("64000"), sl="63000"))["slippage"]
+    assert s["est_fill"] == "64000"
+
+
 async def test_actor_is_recorded(env: Env) -> None:
     await env.tick("65000", **QUOTE)
     _, trade = await env.broker.submit(env.req(actor=Actor.AGENT))

@@ -6,7 +6,7 @@ import { Input, Label } from "@/components/ui/input";
 import { Segmented } from "@/components/ui/segmented";
 import { api, ApiError } from "@/lib/api";
 import type { BookSummary, Direction, Instrument, OrderForm, Preview } from "@/lib/types";
-import { fmtMoney, fmtNum, shortSymbol } from "@/lib/utils";
+import { fmtMoney, fmtNum, fmtPrice, shortSymbol, slippageNote } from "@/lib/utils";
 import { isPriceStale, useApp } from "@/store/app";
 
 /** Manual paper order ticket. Every order is risk-checked by the backend (preview + on submit). */
@@ -31,6 +31,8 @@ export function OrderPanel({
   const [preview, setPreview] = useState<{ key: string; p: Preview } | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  /** The order we just placed, so we can confirm when it actually turns into a position. */
+  const [placed, setPlaced] = useState<{ tradeId: string | null; direction: Direction; qty: string; symbol: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const inst = instruments.find((i) => i.id === instrumentId);
   const tickEntry = useApp((s) => s.ticks[instrumentId]);
@@ -78,7 +80,20 @@ export function OrderPanel({
     return () => clearTimeout(t);
   }, [form, tickBucket]);
 
-  useEffect(() => setResult(null), [instrumentId]);
+  useEffect(() => {
+    setResult(null);
+    setPlaced(null);
+  }, [instrumentId]);
+
+  /** Blank the amounts after a placed order; direction/type/leverage stay as the user set them. */
+  const resetForm = () => {
+    setQty("");
+    setLimitPrice("");
+    setSl("");
+    setTarget("");
+    setPreview(null);
+    setPreviewError(null);
+  };
 
   const submit = async () => {
     if (!form) return;
@@ -86,12 +101,21 @@ export function OrderPanel({
     setResult(null);
     try {
       const r = await api.place(form);
-      setResult(
-        r.approved
-          ? { ok: true, text: `Paper order accepted — fills on the next tick.` }
-          : { ok: false, text: `Blocked by ${r.decision.failed_rule_id}: ${r.decision.message}` },
-      );
+      if (r.approved) {
+        setPlaced({
+          tradeId: r.trade?.id ?? null,
+          direction: form.direction,
+          qty: form.qty,
+          symbol: r.trade?.symbol ?? (inst ? shortSymbol(inst.symbol) : form.instrument_id),
+        });
+        setResult({ ok: true, text: "Paper order accepted — fills on the next tick." });
+        resetForm(); // a placed order must not be re-submittable by accident
+      } else {
+        setPlaced(null);
+        setResult({ ok: false, text: `Blocked by ${r.decision.failed_rule_id}: ${r.decision.message}` });
+      }
     } catch (e) {
+      setPlaced(null);
       setResult({ ok: false, text: e instanceof ApiError ? e.message : "Order failed" });
     } finally {
       setBusy(false);
@@ -103,6 +127,10 @@ export function OrderPanel({
   const decision = current?.decision;
   const ccy = book.currency;
   const allowLeverage = book.segment === "futures";
+  // a market order fills on the NEXT tick, so watch the live book for it turning into a position
+  const openedPosition = placed?.tradeId
+    ? book.positions.find((p) => p.id === placed.tradeId && p.status === "open" && p.avg_entry)
+    : undefined;
 
   return (
     <Card>
@@ -172,7 +200,21 @@ export function OrderPanel({
             <Row k="Max risk allowed" v={fmtMoney(current.max_risk_allowed, ccy)} />
             <Row k="Est. fees (round trip)" v={fmtMoney(current.est_round_trip_charges, ccy, 4)} />
             <Row k="Reward : risk" v={current.reward_risk ? `${current.reward_risk} : 1` : "—"} />
+            {current.slippage && (
+              <>
+                <Row k="Est. fill (with slippage)" v={fmtPrice(current.slippage.est_fill)} />
+                <Row k="Slippage assumed" v={slippageNote(current.slippage)} />
+              </>
+            )}
           </dl>
+        )}
+        {current?.slippage && (
+          <p className="text-xs text-muted-foreground" data-testid="slippage-note">
+            Est. entry is {current.slippage.reference_kind === "bid" ? "the bid" : current.slippage.reference_kind === "ask" ? "the ask" : "LTP ± ½ spread"}{" "}
+            ({fmtPrice(current.slippage.reference_price)}). The {current.slippage.model === "bps" ? `${fmtNum(current.slippage.bps, 0)} bps` : `${current.slippage.extra_ticks}-tick`}{" "}
+            slippage model expects a fill near {fmtPrice(current.slippage.est_fill)} — about {fmtMoney(current.slippage.cost, ccy, 4)} on this size. The real
+            fill comes from the next tick, so it will differ.
+          </p>
         )}
         {decision && (
           <div className={`flex items-start gap-2 text-sm ${decision.approved ? "text-profit" : "text-loss"}`} data-testid="risk-verdict">
@@ -190,10 +232,18 @@ export function OrderPanel({
         >
           {stale ? "Price stale — waiting for data" : `Place paper ${direction === "long" ? "BUY" : "SELL"}`}
         </Button>
-        {result && (
-          <p role="alert" className={`text-sm ${result.ok ? "text-profit" : "text-loss"}`}>
-            {result.text}
-          </p>
+        {openedPosition ? (
+          <div role="alert" className="rounded-md bg-profit/15 px-3 py-2 text-sm text-profit" data-testid="order-result">
+            <span className="font-medium">Position opened</span> — {openedPosition.direction === "long" ? "LONG" : "SHORT"} {openedPosition.qty}{" "}
+            {shortSymbol(openedPosition.symbol)} @ {fmtPrice(openedPosition.avg_entry)}
+            <span className="block text-xs text-muted-foreground">SL {fmtPrice(openedPosition.current_sl)}{openedPosition.target ? ` · target ${fmtPrice(openedPosition.target)}` : ""} — see Open positions below.</span>
+          </div>
+        ) : (
+          result && (
+            <p role="alert" className={`text-sm ${result.ok ? "text-profit" : "text-loss"}`} data-testid="order-result">
+              {result.text}
+            </p>
+          )
         )}
       </CardContent>
     </Card>

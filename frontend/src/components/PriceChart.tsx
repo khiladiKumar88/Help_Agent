@@ -1,4 +1,5 @@
 import {
+  type AutoscaleInfoProvider,
   CandlestickSeries,
   ColorType,
   createChart,
@@ -9,12 +10,14 @@ import {
   LineStyle,
   type UTCTimestamp,
 } from "lightweight-charts";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { PriceScaleNotice } from "@/components/PriceScaleNotice";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Segmented } from "@/components/ui/segmented";
 import { api } from "@/lib/api";
 import { cssColor } from "@/lib/cssColor";
+import { fitPriceRange, type FittedRange, type PriceLevel, positionLevels } from "@/lib/priceRange";
 import type { Candle, TradeView } from "@/lib/types";
 import { fmtPrice, shortSymbol } from "@/lib/utils";
 import { isPriceStale, useApp } from "@/store/app";
@@ -22,6 +25,15 @@ import { isPriceStale, useApp } from "@/store/app";
 type Tf = "1m" | "5m" | "15m" | "1h";
 const TF_SECONDS: Record<Tf, number> = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600 };
 
+
+const LEVEL_COLOR: Record<PriceLevel["kind"], () => string> = {
+  entry: () => cssColor("--muted-foreground"),
+  sl: () => cssColor("--loss"),
+  target: () => cssColor("--profit"),
+};
+
+const barExtent = (bars: { high: number; low: number }[]) =>
+  bars.length ? { min: Math.min(...bars.map((b) => b.low)), max: Math.max(...bars.map((b) => b.high)) } : null;
 
 const toBar = (c: Candle) => ({
   time: (new Date(c.ts_open).getTime() / 1000) as UTCTimestamp,
@@ -37,6 +49,8 @@ export function PriceChart({ instrumentId, symbol, positions }: { instrumentId: 
   const series = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const lines = useRef<IPriceLine[]>([]);
   const lastBar = useRef<ReturnType<typeof toBar> | null>(null);
+  const fitRef = useRef<FittedRange | null>(null);
+  const [barRange, setBarRange] = useState<{ min: number; max: number } | null>(null);
   const [tf, setTf] = useState<Tf>("1m");
   const entry = useApp((s) => s.ticks[instrumentId]);
   const conn = useApp((s) => s.conn);
@@ -80,6 +94,7 @@ export function PriceChart({ instrumentId, symbol, positions }: { instrumentId: 
   useEffect(() => {
     let cancelled = false;
     lastBar.current = null;
+    setBarRange(null);
     api
       .candles(instrumentId, tf, 300)
       .then((r) => {
@@ -88,6 +103,7 @@ export function PriceChart({ instrumentId, symbol, positions }: { instrumentId: 
         if (tf === "1m" && r.forming) bars.push(toBar(r.forming));
         series.current.setData(bars);
         lastBar.current = bars.at(-1) ?? null;
+        setBarRange(barExtent(bars));
         chart.current?.timeScale().scrollToRealTime();
       })
       .catch(() => undefined);
@@ -110,29 +126,53 @@ export function PriceChart({ instrumentId, symbol, positions }: { instrumentId: 
         : { time: t, open: prev?.close ?? px, high: px, low: px, close: px };
     series.current.update(bar);
     lastBar.current = bar;
+    // keep the same object when nothing moved, so this does not re-render on every tick
+    setBarRange((r) =>
+      r && bar.low >= r.min && bar.high <= r.max ? r : { min: Math.min(r?.min ?? bar.low, bar.low), max: Math.max(r?.max ?? bar.high, bar.high) },
+    );
   }, [entry, tf]);
 
-  // entry / SL / target lines for open positions on this instrument
+  // levels of the open positions on this instrument, and the price range that covers them
+  const levels = useMemo(
+    () => positions.filter((p) => p.instrument_id === instrumentId).flatMap(positionLevels),
+    [positions, instrumentId],
+  );
+  const fit = useMemo(() => fitPriceRange(barRange?.min ?? null, barRange?.max ?? null, levels), [barRange, levels]);
+  fitRef.current = fit;
+
+  // draw the levels that fit; the rest become edge markers under the chart
   useEffect(() => {
     const s = series.current;
     if (!s) return;
     lines.current.forEach((l) => s.removePriceLine(l));
-    lines.current = [];
-    for (const p of positions.filter((p) => p.instrument_id === instrumentId)) {
-      const side = p.direction === "long" ? "Long" : "Short";
-      if (p.avg_entry)
-        lines.current.push(
-          s.createPriceLine({ price: Number(p.avg_entry), color: cssColor("--muted-foreground"), lineWidth: 1, lineStyle: LineStyle.Solid, title: `${side} entry` }),
-        );
-      lines.current.push(
-        s.createPriceLine({ price: Number(p.current_sl), color: cssColor("--loss"), lineWidth: 1, lineStyle: LineStyle.Dashed, title: "SL" }),
-      );
-      if (p.target)
-        lines.current.push(
-          s.createPriceLine({ price: Number(p.target), color: cssColor("--profit"), lineWidth: 1, lineStyle: LineStyle.Dashed, title: "Target" }),
-        );
-    }
-  }, [positions, instrumentId]);
+    lines.current = (fit ? fit.included : levels).map((l) =>
+      s.createPriceLine({
+        price: l.price,
+        color: LEVEL_COLOR[l.kind](),
+        lineWidth: 1,
+        lineStyle: l.kind === "entry" ? LineStyle.Solid : LineStyle.Dashed,
+        title: l.label,
+      }),
+    );
+  }, [fit, levels]);
+
+  // make the price scale include those levels (autoscale normally sees only the candles)
+  useEffect(() => {
+    const provider: AutoscaleInfoProvider = (base) => {
+      const res = base();
+      const f = fitRef.current;
+      if (!f) return res;
+      const r = res?.priceRange;
+      return {
+        ...res,
+        priceRange: {
+          minValue: Math.min(r?.minValue ?? f.min, f.min),
+          maxValue: Math.max(r?.maxValue ?? f.max, f.max),
+        },
+      };
+    };
+    series.current?.applyOptions({ autoscaleInfoProvider: provider });
+  }, [fit]);
 
   return (
     <Card>
@@ -156,8 +196,9 @@ export function PriceChart({ instrumentId, symbol, positions }: { instrumentId: 
           options={(["1m", "5m", "15m", "1h"] as Tf[]).map((v) => ({ value: v, label: v }))}
         />
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-2">
         <div ref={el} className="h-72 w-full" data-testid="price-chart" />
+        <PriceScaleNotice fit={fit} />
       </CardContent>
     </Card>
   );

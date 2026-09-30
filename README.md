@@ -12,17 +12,32 @@ Risk rules are plain code that the AI can never override.
 
 Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/), Node 20+.
 
-```bash
-cp .env.example .env      # nothing required for Phase 1
-make install
-make dev                  # live crypto prices (Binance USDⓈ-M public data via ccxt)
+**Windows / PowerShell** (no `make` needed — folder names with spaces are fine):
+
+```powershell
+Copy-Item .env.example .env   # nothing required for Phase 1
+.\run.ps1 install
+.\run.ps1 dev                 # live crypto prices (Binance public data via ccxt)
 # or
-make dev-sim              # offline: seeded simulated prices (labelled SIMULATED in the UI)
+.\run.ps1 dev-sim             # offline: seeded simulated prices (labelled SIMULATED in the UI)
+```
+
+`dev` and `dev-sim` run the backend and the frontend together in one console; Ctrl+C stops both.
+`.\run.ps1 help` lists every command, and `-DryRun` prints what a command would run without
+running it. If PowerShell refuses to run the script, allow local scripts for that session with
+`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`.
+
+**macOS / Linux** (the same commands via `make`):
+
+```bash
+cp .env.example .env
+make install
+make dev                  # or: make dev-sim
 ```
 
 Open http://127.0.0.1:5173. API docs are at http://127.0.0.1:8000/docs.
 
-Without `make`:
+Without either runner:
 
 ```bash
 cd backend && uv sync && uv run uvicorn papermind.main:app --port 8000
@@ -36,9 +51,15 @@ cd frontend && npm install && npm run dev
    plus an optional target and leverage. The panel runs a live risk check. It shows the
    estimated entry, fees, margin, risk if the stop is hit and reward:risk, or the exact
    rule that blocks the order. "max by risk" fills in the largest size your risk limit allows.
-3. Place the order. It fills on the next price tick at bid/ask plus slippage. **Open
-   positions** then shows live P&L **after fees** (including estimated exit fees) and the
-   R-multiple. SL/target lines appear on the chart.
+   It also shows the **slippage the model assumes** (e.g. "2 bps worse than the ask") and the
+   fill that implies, so the difference between the estimate and your actual fill is explained
+   rather than surprising. Slippage is set per book under `slippage:` in the book YAML.
+3. Place the order. The ticket clears, and you get **"Paper order accepted — fills on the next
+   tick"**, which becomes **"Position opened"** with the real fill price, SL and target once the
+   fill lands. **Open positions** then shows live P&L **after fees** (including estimated exit
+   fees) and the R-multiple. Entry/SL/target lines appear on the chart, and the chart widens its
+   price scale to keep them visible; a level too far away to fit without flattening the candles
+   is listed under the chart as "Off the chart: SL 62,000.0 below" instead.
 4. **Close**, or **Edit** the stop/target. Loosening a stop is re-checked against your max
    risk per trade. Stop-loss and target work as one-cancels-the-other.
 5. The **Kill switch** closes every paper position at market and halts all books until you
@@ -85,9 +106,16 @@ book until 00:00 UTC and flattens its positions. Edit `config/books/crypto-futur
 
 ## Tests
 
-```bash
-make check     # lint + types + all tests (backend coverage report included)
+```powershell
+.\run.ps1 check    # Windows
 ```
+
+```bash
+make check         # macOS / Linux
+```
+
+Either one runs lint + types + every test, with the backend coverage report. `run.ps1 test`
+(or `make test`) runs just the tests.
 
 ## Roadmap
 

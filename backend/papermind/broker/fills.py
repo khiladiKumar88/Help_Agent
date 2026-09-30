@@ -38,6 +38,27 @@ def market_fill(inst: Instrument, side: Side, tick: Tick, cfg: SlippageConfig) -
     return FillQuote(price=price, reference_price=ref, reference_kind=kind, slippage=abs(price - ref))
 
 
+def estimate_entry_fill(
+    inst: Instrument, side: Side, tick: Tick, cfg: SlippageConfig, limit_price: Decimal | None = None
+) -> FillQuote:
+    """The entry fill the order preview should expect, using the very same model as the real fill.
+
+    Mirrors `PaperBroker._process_order`: a market order pays the slippage model on top of the
+    touch price; a limit entry never fills worse than its limit. Preview and execution therefore
+    cannot drift apart. It is still an estimate: the real fill happens on the NEXT tick.
+    """
+    q = market_fill(inst, side, tick, cfg)
+    if limit_price is None:
+        return q
+    price = min(q.price, limit_price) if side is Side.BUY else max(q.price, limit_price)
+    return FillQuote(
+        price=price,
+        reference_price=q.reference_price,
+        reference_kind=q.reference_kind,
+        slippage=abs(price - q.reference_price),
+    )
+
+
 def exit_trigger_price(tick: Tick, side: Side) -> Decimal:
     """Price used to decide whether a stop/target on the EXIT side has been touched."""
     if side is Side.SELL:

@@ -97,7 +97,10 @@ class JobManager:
         return True
 
     def _row(self, row: BacktestRunRow, full: bool) -> dict[str, Any]:
-        live = self._live.get(row.id)
+        # Only an unfinished job may report live progress. `_run` writes the terminal status
+        # before it clears `_live`, so a finished job would otherwise briefly report the last
+        # in-flight fraction (e.g. 0.5) instead of its final one.
+        live = self._live.get(row.id) if row.status in ("queued", "running") else None
         out: dict[str, Any] = {
             "id": row.id,
             "kind": row.kind,

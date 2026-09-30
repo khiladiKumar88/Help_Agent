@@ -97,17 +97,35 @@ Key concepts:
 
 ## Run
 
+Windows (`run.ps1`) and macOS/Linux (`make`) take the same command names. Keep them in step:
+a new command belongs in both.
+
+```powershell
+.\run.ps1 install     # uv sync + npm install
+.\run.ps1 dev         # live public crypto data (ccxt, binanceusdm) — needs internet
+.\run.ps1 dev-sim     # offline simulated feed (clearly labelled SIMULATED in the UI)
+.\run.ps1 help        # every command;  add -DryRun to print a command without running it
+```
+
 ```bash
-make install          # uv sync + npm install
-make dev              # live public crypto data (ccxt, binanceusdm) — needs internet
-make dev-sim          # offline simulated feed (clearly labelled SIMULATED in the UI)
+make install          # the same, via make
+make dev
+make dev-sim
 # UI: http://127.0.0.1:5173   API: http://127.0.0.1:8000/docs
 ```
 
+`dev` / `dev-sim` run both servers in one console and stop both on Ctrl+C. `run.ps1` derives
+every path from `$PSScriptRoot`, so a checkout under a folder with spaces works;
+`tests/test_run_ps1.py` asserts that (and the command set) by running it with `-DryRun`.
+
 ## Test / quality gates (all must pass before a phase is done)
 
+```powershell
+.\run.ps1 check       # ruff + ruff format --check + mypy --strict + pytest (cov) + tsc + vitest
+```
+
 ```bash
-make check            # ruff + ruff format --check + mypy --strict + pytest (cov) + tsc + vitest
+make check            # the same
 ```
 - Migrations: change models → `cd backend && uv run alembic revision --autogenerate -m "..."`,
   review the file, then `tests/db/test_migrations.py` must pass (head == models).
@@ -119,7 +137,9 @@ make check            # ruff + ruff format --check + mypy --strict + pytest (cov
 
 ## Conventions
 
-- Python 3.11+, full type hints, `mypy --strict` clean, ruff (line length 120).
+- Python 3.11+, full type hints, `mypy --strict` clean, ruff (line length 120). mypy has no
+  pinned `python_version`, so it checks against whichever interpreter you run it on (that is the
+  one whose dependencies are installed); ruff's `target-version = "py311"` guards the syntax floor.
 - New risk rule ⇒ a pure function in `risk/rules.py` with a stable `Rxxx_NAME` id, added to
   `RULES`, with pass + fail tests.
 - New market-data source ⇒ implement `MarketDataProvider`, push into `MarketHub`, no
@@ -131,6 +151,13 @@ make check            # ruff + ruff format --check + mypy --strict + pytest (cov
 - UI: dark by default; never show a price without the stale check (`isPriceStale`); wrap
   widgets in `ErrorBoundary`. Chart colours: categorical slots from the validated palette
   (see `components/Charts.tsx`).
+- Chart maths lives in `lib/` as pure functions (`lib/priceRange.ts`), not inside the
+  `lightweight-charts` effects, so it is testable directly. `test/setup.ts` shims `matchMedia`,
+  `ResizeObserver` and a no-op 2D canvas context, which is what lets chart components mount in
+  jsdom at all (`test/priceChart.test.tsx`); assert against the DOM they render, never pixels.
+- The order preview shows the assumed slippage from the same code path the fill uses
+  (`broker/fills.estimate_entry_fill`), so the preview can never quote a model the broker
+  does not apply.
 
 ## Status
 
@@ -140,5 +167,11 @@ make check            # ruff + ruff format --check + mypy --strict + pytest (cov
 - **Phase 2 — done.** Alembic, history store + downloader + coverage, indicators, regime,
   6 strategies, scanner, rules agent, random baseline, backtester, walk-forward (OOS only),
   day replay, metrics + plain-English verdicts, synthetic option pricer, Backtest/Replay page.
+- **Windows parity + Phase-2 leftovers — done.** `run.ps1` (install/dev/dev-sim/test/check,
+  safe with spaces in paths); the price chart fits its scale to the SL/target of open positions
+  and marks levels too far away to fit; the order ticket resets and confirms "position opened"
+  with the real fill price; the order preview states the slippage the model assumed.
+  Windows fix: Alembic's config is `%`-escaped, because SQLAlchemy percent-encodes Windows
+  paths in a URL and ConfigParser interpolation choked on it.
 - Phase 3 — LLM analyst (Gemini) as a Decider, Co-pilot/Auto, Live page: next.
 - Phases 4–6: see README roadmap.

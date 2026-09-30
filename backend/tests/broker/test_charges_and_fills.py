@@ -7,7 +7,7 @@ from decimal import Decimal
 import pytest
 
 from papermind.broker.charges import CryptoCharges, IndiaFnoCharges, make_charges
-from papermind.broker.fills import exit_trigger_price, market_fill, touch_price
+from papermind.broker.fills import estimate_entry_fill, exit_trigger_price, market_fill, touch_price
 from papermind.core.config import CryptoChargesConfig, IndiaFnoChargesConfig, Market, Segment, SlippageConfig
 from papermind.core.types import Instrument, InstrumentKind, Liquidity, Side, Tick
 from tests.conftest import BTC, T0, ccxt_instruments, crypto_charges, india_charges
@@ -142,6 +142,32 @@ class TestFills:
         t = Tick(instrument_id=opt.id, ts=T0, ltp=D("0.05"), bid=D("0.05"), ask=D("0.1"))
         q = market_fill(opt, Side.SELL, t, SlippageConfig(model="spread", extra_ticks=5))
         assert q.price == opt.tick_size
+
+    def test_estimate_entry_fill_matches_market_fill_for_market_orders(self) -> None:
+        btc = ccxt_instruments()[0]
+        t = Tick(instrument_id=BTC, ts=T0, ltp=D("65000"), bid=D("64999.9"), ask=D("65000"))
+        cfg = SlippageConfig(bps=D("2"))
+        assert estimate_entry_fill(btc, Side.BUY, t, cfg) == market_fill(btc, Side.BUY, t, cfg)
+
+    def test_estimate_entry_fill_caps_a_limit_buy_at_its_limit(self) -> None:
+        btc = ccxt_instruments()[0]
+        t = Tick(instrument_id=BTC, ts=T0, ltp=D("65000"), bid=D("64999.9"), ask=D("65000"))
+        cfg = SlippageConfig(bps=D("2"))
+        # resting below the market: it fills at the limit, so slippage is measured off the ask
+        q = estimate_entry_fill(btc, Side.BUY, t, cfg, limit_price=D("64000"))
+        assert q.price == D("64000") and q.slippage == D("1000")
+        # marketable (limit above the ask): pays the slippage model, not the limit
+        q = estimate_entry_fill(btc, Side.BUY, t, cfg, limit_price=D("66000"))
+        assert q.price == D("65013") and q.slippage == D("13")
+
+    def test_estimate_entry_fill_caps_a_limit_sell_at_its_limit(self) -> None:
+        btc = ccxt_instruments()[0]
+        t = Tick(instrument_id=BTC, ts=T0, ltp=D("65000"), bid=D("64999.9"), ask=D("65000"))
+        cfg = SlippageConfig(bps=D("2"))
+        q = estimate_entry_fill(btc, Side.SELL, t, cfg, limit_price=D("66000"))
+        assert q.price == D("66000")
+        q = estimate_entry_fill(btc, Side.SELL, t, cfg, limit_price=D("64000"))
+        assert q.price == D("64986.9")  # bid - 2 bps, floored to the tick
 
     @pytest.mark.parametrize(("side", "expected"), [(Side.SELL, D("99")), (Side.BUY, D("101"))])
     def test_exit_trigger_price(self, side: Side, expected: Decimal) -> None:

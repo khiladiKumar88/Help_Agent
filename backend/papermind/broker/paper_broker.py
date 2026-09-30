@@ -18,7 +18,7 @@ from decimal import Decimal
 from typing import Any
 
 from papermind.broker.charges import ChargesModel, make_charges
-from papermind.broker.fills import FillQuote, exit_trigger_price, market_fill, touch_price
+from papermind.broker.fills import FillQuote, estimate_entry_fill, exit_trigger_price, market_fill, touch_price
 from papermind.core.clock import Clock
 from papermind.core.config import AppConfig, BookConfig
 from papermind.core.events import EventBus, Topic
@@ -258,6 +258,32 @@ class PaperBroker:
             round_trip_charges=round_trip if inst is not None else None,
         )
 
+    def slippage_estimate(self, ctx: RiskContext, req: OrderRequest) -> dict[str, Any] | None:
+        """What the slippage model assumes, so the gap between `est_entry` and the real fill is explainable.
+
+        `est_entry` is the touch price (ask for a buy, bid for a sell). The fill pays the book's
+        slippage on top of it. Read-only: this never influences the risk decision.
+        """
+        inst, tick = ctx.instrument, ctx.tick
+        if inst is None or tick is None:
+            return None
+        cfg = ctx.book.slippage
+        limit = req.limit_price if req.order_type is OrderType.LIMIT else None
+        q = estimate_entry_fill(inst, req.direction.entry_side, tick, cfg, limit)
+        return jdict(
+            {
+                "model": cfg.model,
+                "bps": cfg.bps,
+                "est_spread_bps": cfg.est_spread_bps,
+                "extra_ticks": cfg.extra_ticks,
+                "reference_price": q.reference_price,
+                "reference_kind": q.reference_kind,
+                "est_fill": q.price,
+                "per_unit": q.slippage,
+                "cost": q.slippage * req.qty * inst.contract_size,
+            }
+        )
+
     def preview(self, req: OrderRequest) -> dict[str, Any]:
         ctx = self.build_context(req)
         decision = self.risk.evaluate(ctx, req)
@@ -280,6 +306,7 @@ class PaperBroker:
                 "est_round_trip_charges": ctx.est_charges(req),
                 "max_risk_allowed": ctx.max_risk_allowed(),
                 "max_qty_by_risk": self.risk.max_qty_for_risk(ctx, req),
+                "slippage": self.slippage_estimate(ctx, req),
                 "stale": ctx.stale,
             }
         )

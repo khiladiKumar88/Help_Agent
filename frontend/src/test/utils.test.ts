@@ -1,4 +1,4 @@
-import { ageSeconds, bookId, fmtAxisTime, timeTicks, fmtMoney, fmtNum, fmtPrice, fmtSigned, num, pnlClass, shortSymbol } from "@/lib/utils";
+import { ageSeconds, bookId, fmtAxisTime, timeTicks, fmtMoney, fmtNum, fmtPrice, fmtSigned, num, pnlClass, shortSymbol, slippageNote } from "@/lib/utils";
 import { isPriceStale } from "@/store/app";
 
 describe("formatters", () => {
@@ -46,5 +46,25 @@ describe("time axis helpers", () => {
     expect(timeTicks([5, 5])).toEqual([5]);
     expect(timeTicks([])).toEqual([]);
     expect(fmtAxisTime(Date.UTC(2026, 0, 5), 10 * 86_400_000)).toMatch(/Jan/);
+  });
+});
+
+describe("slippageNote", () => {
+  const s = (over: Partial<Parameters<typeof slippageNote>[0]> = {}) =>
+    slippageNote({ model: "bps", bps: "2", extra_ticks: 0, est_spread_bps: "2", reference_kind: "ask", ...over });
+
+  it("names the bps and the side of the book it is measured from", () => {
+    expect(s()).toBe("2 bps worse than the ask");
+    expect(s({ reference_kind: "bid" })).toBe("2 bps worse than the bid");
+    expect(s({ bps: "10.5" })).toBe("10.5 bps worse than the ask");
+  });
+
+  it("falls back to the estimated spread when there is no quote", () => {
+    expect(s({ reference_kind: "ltp_half_spread", est_spread_bps: "4" })).toBe("2 bps worse than LTP ± ½ spread (4 bps)");
+  });
+
+  it("counts ticks for the spread model", () => {
+    expect(s({ model: "spread", extra_ticks: 2 })).toBe("2 ticks worse than the ask");
+    expect(s({ model: "spread", extra_ticks: 1 })).toBe("1 tick worse than the ask");
   });
 });
