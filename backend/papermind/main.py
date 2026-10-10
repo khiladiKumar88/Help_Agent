@@ -10,7 +10,15 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from papermind.api import routes_backtest, routes_books, routes_market, routes_orders, routes_system, ws
+from papermind.api import (
+    routes_agent,
+    routes_backtest,
+    routes_books,
+    routes_market,
+    routes_orders,
+    routes_system,
+    ws,
+)
 from papermind.backtest.jobs import JobManager
 from papermind.core.config import Settings, load_config
 from papermind.core.logging import setup_logging
@@ -65,6 +73,7 @@ def create_app(engine_factory: Callable[[], Engine] = build_engine) -> FastAPI:
         routes_orders.router,
         routes_market.router,
         routes_backtest.router,
+        routes_agent.router,
         ws.router,
     ):
         app.include_router(r)

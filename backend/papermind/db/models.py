@@ -237,8 +237,23 @@ class SignalRow(Base):
     trade_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     baseline_trade_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     risk_rule_blocked: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    # --- Phase 3: the analyst's verdict (the LLM never changes the risk rules)
+    confidence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reasoning: Mapped[str] = mapped_column(Text, default="")  # short plain English
+    risks_noted: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    lessons_applied: Mapped[list[Any]] = mapped_column(JSON, default=list)  # Phase 4; [] for now
+    adjustments: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # stricter-only, applied
+    prompt_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    llm_call_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # --- Co-pilot card lifecycle
+    card_status: Mapped[str] = mapped_column(String(16), default="none")  # none|pending|approved|rejected|expired
+    card_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    card_decided_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    # --- shadow tracking: what the unfiltered strategy / a rejected card actually did
+    raw_trade_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    rejected_trade_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
-    __table_args__ = (Index("ix_signals_book_ts", "book_id", "ts"),)
+    __table_args__ = (Index("ix_signals_book_ts", "book_id", "ts"), Index("ix_signals_card", "book_id", "card_status"))
 
 
 class BacktestRunRow(Base):
@@ -254,3 +269,47 @@ class BacktestRunRow(Base):
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
     __table_args__ = (Index("ix_backtest_created", "created_at"),)
+
+
+class LLMCallRow(Base):
+    """Every LLM call: prompt version, prompt, response, latency, tokens, outcome.
+
+    Secrets never reach a prompt, so nothing here needs redacting — but the API still only
+    exposes these rows through the journal endpoints, never the raw API key.
+    """
+
+    __tablename__ = "llm_calls"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(UTCDateTime)
+    book_id: Mapped[str] = mapped_column(String(64))
+    signal_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    purpose: Mapped[str] = mapped_column(String(24), default="analyst")  # analyst | reflection (Phase 4)
+    provider: Mapped[str] = mapped_column(String(24))
+    model: Mapped[str] = mapped_column(String(64))
+    prompt_version: Mapped[str] = mapped_column(String(32))
+    prompt_hash: Mapped[str] = mapped_column(String(64))
+    system_prompt: Mapped[str] = mapped_column(Text, default="")
+    prompt: Mapped[str] = mapped_column(Text, default="")
+    response: Mapped[str] = mapped_column(Text, default="")
+    ok: Mapped[bool] = mapped_column(Boolean, default=False)
+    error_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    thought_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cached: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    __table_args__ = (Index("ix_llm_calls_ts", "ts"), Index("ix_llm_calls_book_ts", "book_id", "ts"))
+
+
+class LLMCacheRow(Base):
+    """Response cache keyed by prompt hash, so re-running a replay does not burn quota."""
+
+    __tablename__ = "llm_cache"
+    prompt_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    model: Mapped[str] = mapped_column(String(64))
+    response: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    hits: Mapped[int] = mapped_column(Integer, default=0)

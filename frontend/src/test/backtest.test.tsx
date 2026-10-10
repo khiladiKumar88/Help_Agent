@@ -35,7 +35,7 @@ const result: BacktestResult = {
 const status = {
   server_time: "", replay: false, kill_switch: { engaged: false }, provider: { provider: "ccxt", exchange: "binanceusdm", connected: true },
   data: {}, stale_after_seconds: 10, books: { "crypto-futures-intraday": { status: "running", mode: "manual" } },
-  llm: { provider: null, calls_today: 0, daily_budget: null }, secrets: {},
+  llm: { provider: null, model: "none", calls_today: 0, daily_budget: null, enabled: false }, secrets: {},
 } as SystemStatus;
 
 beforeEach(() => {
@@ -44,6 +44,30 @@ beforeEach(() => {
 });
 
 describe("ResultView", () => {
+  it("flags an LLM-in-the-loop run on past dates as possible hindsight bias", () => {
+    render(
+      <ResultView
+        r={{
+          ...result,
+          llm: {
+            mode: "on",
+            description: "The configured LLM analyst decides each signal.",
+            hindsight_risk: true,
+            hindsight_warning: "The analyst judged dates that are already in the past, and the model may have seen this period while it was trained.",
+          },
+        }}
+      />,
+    );
+    const warn = screen.getByTestId("hindsight-warning");
+    expect(warn).toHaveTextContent("POSSIBLE HINDSIGHT BIAS");
+    expect(warn).toHaveTextContent("may have seen this period");
+  });
+
+  it("shows no hindsight warning when the LLM was off", () => {
+    render(<ResultView r={{ ...result, llm: { mode: "off", description: "LLM off", hindsight_risk: false, hindsight_warning: null } }} />);
+    expect(screen.queryByTestId("hindsight-warning")).not.toBeInTheDocument();
+  });
+
   it("shows the plain-English summary, verdicts, OOS metrics and folds", () => {
     render(<ResultView r={result} />);
     expect(screen.getByTestId("plain-english")).toHaveTextContent("Beat the baseline: YES");

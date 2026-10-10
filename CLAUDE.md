@@ -14,14 +14,21 @@ trades simulated money only. It is built in phases; see "Status" below.
      refuses credentials at runtime.
 2. **The LLM never controls risk.** Risk rules live in `risk/` as pure functions. Nothing
    the LLM outputs can change, override or bypass them. `require_stop_loss` can't be disabled.
-3. **Fail safe.** Stale data (> `data.stale_after_seconds`), LLM error/rate-limit, invalid
-   JSON, any exception ⇒ **NO TRADE**. Log it and keep running. Event-bus handlers
-   are isolated so one failure never stops the engine. The UI shows disconnected/stale states.
+   The analyst answers only TAKE/SKIP plus *stricter-only* adjustments (a tighter stop, a smaller
+   size); `analyst/schema.apply_adjustments` drops anything looser and records that it did.
+   `risk/` still runs afterwards and has the final say.
+3. **Fail safe.** Stale data (> `data.stale_after_seconds`), LLM error/rate-limit/timeout,
+   invalid JSON, a schema violation, an exhausted daily budget, any exception ⇒ **NO TRADE**.
+   Log it and keep running. Event-bus handlers are isolated so one failure never stops the
+   engine. The UI shows disconnected/stale states. There is no "LLM failed, so take it anyway"
+   path: without an analyst the agent modes are refused and the UI says why.
 4. **Everything is logged:** risk decisions (`risk_decisions`), orders, fills, trades,
-   ledger, audit log (`audit_log`). LLM calls, signals and lessons get logged too once those
-   phases land.
+   ledger, audit log (`audit_log`), and every LLM call (`llm_calls`: prompt version, prompt,
+   response, latency, tokens, failure reason). Lessons get logged once Phase 4 lands.
 5. **Secrets only in `.env`** (`.env.example` is committed). Logging passes through
-   `core/logging.RedactingFilter`; the API exposes secret *presence* only.
+   `core/logging.RedactingFilter`; the API exposes secret *presence* only. Nothing secret ever
+   goes into a prompt (test-enforced), and the API key is read from the environment by the
+   provider alone.
 6. **No lookahead.** Everything reads time from the injected `Clock`. Use `ReplayClock` for
    replays and tests. Strategies/backtests only ever see **closed** candles (`CandleBuilder`
    emits closed bars only; `ohlcv_to_candles` drops the forming bar).
@@ -62,7 +69,11 @@ backend/papermind/
   backtest/    HistoricalReplayProvider, runner (backtest / walk-forward / replay), metrics,
                options (Black-Scholes synthetic pricing), jobs (background worker thread)
   engine.py    wires everything; EngineOptions switch live vs replay (same class!)
-  analyst/ memory/ learning/   (later phases)
+  llm/         LLMProvider ABC; GeminiProvider (google-genai Interactions API); FakeProvider
+               (deterministic, used by every test); RateLimiter (token bucket + daily budget)
+  analyst/     LLMAnalyst as a Decider; prompts/*.md (versioned); schema.py (strict JSON +
+               stricter-only adjustments); context.py (compact prompt, Phase-4 hooks); factory.py
+  memory/ learning/   (later phases)
 frontend/      React 19 + Vite + TS + Tailwind v4 + shadcn-style ui + Zustand +
                lightweight-charts + Recharts
 vault/         Obsidian-compatible second brain (Phase 4)
@@ -70,10 +81,14 @@ vault/         Obsidian-compatible second brain (Phase 4)
 
 Data flow: provider → `MarketHub` → `MarketState` + `CandleBuilder` → bus `TICK` →
 `PaperBroker.on_tick` (fills/OCO/trailing/daily-loss). Bus `CANDLE` (closed only) → `Scanner`
-(FeatureFrame → regime → strategies) → `SIGNAL` → `AgentExecutor` (Decider: rules now, LLM in
-Phase 3) → `AGENT_DECISION` (→ `BaselineAgent`) → sizing → **RiskManager** inside
-`broker.submit` → PaperBroker → Journal → WebSocket → UI. The agent only places orders in Auto
-mode (Phase 3) or when `force_execute` (backtests/replays).
+(FeatureFrame → regime → strategies) → `SIGNAL` → `AgentExecutor` (Decider: `LLMAnalyst`, or
+`RuleDecider` when the LLM is off) → `AGENT_DECISION` (→ `BaselineAgent`) → sizing →
+**RiskManager** inside `broker.submit` → PaperBroker → Journal → WebSocket → UI.
+
+Mode routing in `AgentExecutor`: **Manual** records the signal and trades nothing; **Co-pilot**
+turns a TAKE into a pending card you approve or reject (it expires after
+`copilot.card_ttl_bars`); **Auto** places it itself. `force_execute` (backtests/replays) always
+executes. The analyst is called once per signal — never per tick.
 
 Replay/backtest = `Engine(cfg, clock=ReplayClock, provider=HistoricalReplayProvider,
 options=EngineOptions(drive_timers=False, force_execute=True, ...))`. Each stored bar becomes 4
@@ -84,9 +99,17 @@ replay and a backtest of that day produce identical agent trades.
 Key concepts:
 - **Book** = market × segment × style (`crypto-futures-intraday`). Each book has its own
   currency, wallet, risk config and stats. The id must equal `f"{market}-{segment}-{style}"`.
-- **Account** inside a book: `main` (human + agent share it), `shadow_baseline` (random
-  baseline, own wallet + own daily-loss halt) and `shadow_rejected` (Phase 3). Balances are
-  sums of the append-only ledger.
+- **Account** inside a book, each with its own wallet and its own daily-loss halt; balances are
+  sums of the append-only ledger:
+  - `main` — human + agent share it
+  - `shadow_baseline` — random entries, same risk and frequency
+  - `shadow_raw` — EVERY signal, unfiltered. This is the control group that says whether the
+    analyst's TAKE/SKIP filter beats taking everything. It only runs when an analyst is actually
+    filtering; with the LLM off the agent already *is* the raw strategy.
+  - `shadow_rejected` — Co-pilot cards you rejected, so a veto's cost is measurable
+  Shadow trades are tagged `actor=agent`, so anything comparing actors must key on
+  (account, actor) — see `SERIES_SOURCES` in `api/routes_books.py`. `/api/books/{id}/edge`
+  reports all five side by side.
 - **Baseline**: for each signal the agent TAKES, a random-direction entry after 0..N bars with
   the same stop distance, R:R, sizing and risk rules (seeded). The agent must beat it.
 - **Actor** on every trade: `human | agent | baseline`.
@@ -130,7 +153,10 @@ make check            # the same
 - Migrations: change models → `cd backend && uv run alembic revision --autogenerate -m "..."`,
   review the file, then `tests/db/test_migrations.py` must pass (head == models).
 - Tests are deterministic: `ReplayClock`, in-memory SQLite, fixtures in
-  `backend/tests/fixtures/`. **No test may hit a live API.**
+  `backend/tests/fixtures/`. **No test may hit a live API.** The LLM is always `FakeProvider`
+  or a stubbed SDK client. The single live smoke test (`tests/llm/test_live_gemini.py`) carries
+  the `live` marker, which `addopts = -m 'not live'` excludes — run it deliberately with
+  `PAPERMIND_LIVE_LLM=1 uv run pytest -m live`.
 - Coverage target ≥ 80% on `risk/`, `broker/`, `learning/`, `backtest/`.
 - Worked numeric examples in broker/charges tests are computed by hand. If you change
   fill or fee maths, re-derive them. Never just update the expected numbers.
@@ -144,6 +170,14 @@ make check            # the same
   `RULES`, with pass + fail tests.
 - New market-data source ⇒ implement `MarketDataProvider`, push into `MarketHub`, no
   private endpoints, add fixture-based tests.
+- New LLM provider ⇒ subclass `llm.base.LLMProvider`, raise an `LLMError` subclass for EVERY
+  failure (the analyst maps each one to NO TRADE), register it in `analyst/factory.build_provider`,
+  and test it with a stubbed client — never the network.
+- Changing the analyst's behaviour ⇒ add a new `analyst/prompts/<version>.md` and bump
+  `llm.prompt_version`; the version used is stored on every decision, so old decisions stay
+  explainable. Never edit a shipped prompt in place.
+- The model id and every rate/budget limit come from `llm` config. Google publishes free-tier
+  limits per account in AI Studio, not in its docs, so they can never be hardcoded.
 - New strategy ⇒ subclass `Strategy` in `strategies/builtin.py` (or a new module registered in
   `STRATEGIES`), use only `ctx.frame` (closed candles), declare `default_params` and a SMALL
   `param_grid`, return levels via `Strategy.build` (tick-rounded, sanity-checked), add tests.
@@ -173,5 +207,19 @@ make check            # the same
   with the real fill price; the order preview states the slippage the model assumed.
   Windows fix: Alembic's config is `%`-escaped, because SQLAlchemy percent-encodes Windows
   paths in a URL and ConfigParser interpolation choked on it.
-- Phase 3 — LLM analyst (Gemini) as a Decider, Co-pilot/Auto, Live page: next.
-- Phases 4–6: see README roadmap.
+- **Phase 3 — done.** Gemini via the official `google-genai` SDK behind `LLMProvider`
+  (model + limits from config); token-bucket rate limiter + daily budget that PAUSES the agent
+  rather than trading without a verdict; strict JSON validated by Pydantic; versioned prompts;
+  every call logged; response cache by prompt hash so replays cost no quota; `shadow_raw` and
+  `shadow_rejected` accounts plus `/edge` so the analyst's filter is measurable; Co-pilot cards
+  with expiry, Auto behind a confirm dialog; Live, Journal and Settings pages; backtests/replays
+  take `llm=off|fake|on` (default off) and label `on` as possible hindsight bias.
+- Phases 4–6: see README roadmap. The Phase-4 hooks are already in `analyst/context.py`
+  (`LessonSource`, `EpisodeSource`) and return empty for now.
+
+### Known gaps worth fixing before they mislead anyone
+
+- Walk-forward's aggregate `max_drawdown_pct` and `return_pct` are computed over the stitched
+  test windows, but each window's engine run restarts from the book's starting capital. The
+  curve can therefore read >100% drawdown (four independent 1,000-USDT accounts reported as
+  one). Per-fold numbers are fine; the aggregate percentages are not.

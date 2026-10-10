@@ -16,7 +16,7 @@ const status: SystemStatus = {
   data: {},
   stale_after_seconds: 10,
   books: { "crypto-futures-intraday": { status: "running", mode: "manual" } },
-  llm: { provider: null, calls_today: 0, daily_budget: null },
+  llm: { provider: null, model: "none", calls_today: 0, daily_budget: null, enabled: false },
   secrets: {},
 };
 
@@ -32,7 +32,8 @@ beforeEach(() => {
 });
 
 describe("TopBar", () => {
-  it("shows running status and disables phase-3 modes", () => {
+  it("shows running status, and disables the agent modes while no analyst is running", () => {
+    // this fixture has llm.enabled false, so Co-pilot/Auto would be trading blind
     render(<TopBar />);
     expect(screen.getByLabelText(/Agent status: Running/)).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Co-pilot" })).toBeDisabled();

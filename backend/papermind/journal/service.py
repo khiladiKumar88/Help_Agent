@@ -26,6 +26,8 @@ from papermind.db.models import (
     EquitySnapshotRow,
     FillRow,
     LedgerEntryRow,
+    LLMCacheRow,
+    LLMCallRow,
     OrderRow,
     RiskDecisionRow,
     SignalRow,
@@ -302,6 +304,51 @@ class Journal:
             for k, v in fields.items():
                 setattr(row, k, v)
 
+    def get_signal(self, signal_id: str) -> dict[str, Any] | None:
+        with self.db.session() as s:
+            row = s.get(SignalRow, signal_id)
+            return self._signal_row(row) if row else None
+
+    @staticmethod
+    def _signal_row(row: SignalRow) -> dict[str, Any]:
+        return {c.name: getattr(row, c.name) for c in SignalRow.__table__.columns}
+
+    @staticmethod
+    def signal_from_row(row: dict[str, Any]) -> Signal:
+        """Rebuild the Signal object from a stored row (used when a human resolves a card)."""
+        fields = set(Signal.model_fields)
+        return Signal.model_validate({k: v for k, v in row.items() if k in fields})
+
+    def pending_cards(self, book_id: str | None = None) -> list[dict[str, Any]]:
+        """Co-pilot cards still awaiting a human answer, oldest first."""
+        q = select(SignalRow).where(SignalRow.card_status == "pending")
+        if book_id:
+            q = q.where(SignalRow.book_id == book_id)
+        with self.db.session() as s:
+            return [self._signal_row(r) for r in s.scalars(q.order_by(SignalRow.ts))]
+
+    def list_signals_filtered(
+        self,
+        book_id: str,
+        limit: int = 100,
+        decision: str | None = None,
+        strategy_id: str | None = None,
+        card_status: str | None = None,
+        executed: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        """Journal page: every signal, taken or skipped, with the usual filters."""
+        q = select(SignalRow).where(SignalRow.book_id == book_id)
+        if decision:
+            q = q.where(SignalRow.decision == decision)
+        if strategy_id:
+            q = q.where(SignalRow.strategy_id == strategy_id)
+        if card_status:
+            q = q.where(SignalRow.card_status == card_status)
+        if executed is not None:
+            q = q.where(SignalRow.executed == executed)
+        with self.db.session() as s:
+            return [self._signal_row(r) for r in s.scalars(q.order_by(SignalRow.ts.desc()).limit(limit))]
+
     def list_signals(self, book_id: str, limit: int = 50) -> list[dict[str, Any]]:
         q = select(SignalRow).where(SignalRow.book_id == book_id).order_by(SignalRow.ts.desc()).limit(limit)
         with self.db.session() as s:
@@ -365,6 +412,61 @@ class Journal:
         with self.db.session() as s:
             return [{c.name: getattr(r, c.name) for c in AuditLogRow.__table__.columns} for r in s.scalars(q)]
 
+    # ------------------------------------------------------------------ LLM
+    def record_llm_call(self, call_id: str, **fields: Any) -> None:
+        """Log every LLM call — success or failure. Never raises into the caller."""
+        try:
+            with self.db.session() as s:
+                s.add(LLMCallRow(id=call_id, ts=self.clock.now(), **fields))
+        except Exception:  # logging a call must never stop the engine
+            log.exception("failed to record LLM call")
+
+    def list_llm_calls(self, book_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        q = select(LLMCallRow)
+        if book_id:
+            q = q.where(LLMCallRow.book_id == book_id)
+        q = q.order_by(LLMCallRow.ts.desc()).limit(limit)
+        with self.db.session() as s:
+            return [{c.name: getattr(r, c.name) for c in LLMCallRow.__table__.columns} for r in s.scalars(q)]
+
+    def get_llm_call(self, call_id: str) -> dict[str, Any] | None:
+        with self.db.session() as s:
+            row = s.get(LLMCallRow, call_id)
+            return {c.name: getattr(row, c.name) for c in LLMCallRow.__table__.columns} if row else None
+
+    def llm_usage_today(self, day_start: datetime) -> dict[str, Any]:
+        q = select(LLMCallRow).where(LLMCallRow.ts >= day_start)
+        with self.db.session() as s:
+            rows = list(s.scalars(q))
+        return {
+            "calls": len(rows),
+            "errors": sum(1 for r in rows if not r.ok),
+            "cached": sum(1 for r in rows if r.cached),
+            "input_tokens": sum(r.input_tokens or 0 for r in rows),
+            "output_tokens": sum(r.output_tokens or 0 for r in rows),
+        }
+
+    def get_llm_cache(self, prompt_hash: str, model: str) -> str | None:
+        """Cached response for an identical prompt, so replays cost no quota."""
+        with self.db.session() as s:
+            row = s.get(LLMCacheRow, prompt_hash)
+            if row is None or row.model != model:
+                return None
+            row.hits += 1
+            return row.response
+
+    def put_llm_cache(self, prompt_hash: str, model: str, response: str) -> None:
+        try:
+            with self.db.session() as s:
+                s.merge(
+                    LLMCacheRow(
+                        prompt_hash=prompt_hash, model=model, response=response, created_at=self.clock.now(), hits=0
+                    )
+                )
+        except Exception:
+            log.exception("failed to cache LLM response")
+
+    # ------------------------------------------------------------------ state
     def get_state(self, key: str) -> dict[str, Any] | None:
         with self.db.session() as s:
             row = s.get(SystemStateRow, key)

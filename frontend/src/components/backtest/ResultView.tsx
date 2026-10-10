@@ -29,11 +29,23 @@ export function ResultView({ r }: { r: BacktestResult }) {
           <CircleAlert className="h-4 w-4" /> APPROXIMATE — option prices were synthesized with Black-Scholes, not real quotes.
         </div>
       )}
+      {r.llm?.hindsight_warning && (
+        <div
+          className="flex items-start gap-2 rounded-md bg-warning/15 px-4 py-2 text-sm text-warning"
+          data-testid="hindsight-warning"
+        >
+          <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            <span className="font-medium">POSSIBLE HINDSIGHT BIAS</span> — {r.llm.hindsight_warning}
+          </span>
+        </div>
+      )}
       <Card>
         <CardHeader>
           <CardTitle className="text-foreground">{TITLE[r.kind]}</CardTitle>
           <span className="text-xs text-muted-foreground">
             {fmtDateTime(r.period.start)} → {fmtDateTime(r.period.end)} · {r.instrument}
+            {r.llm && r.llm.mode !== "off" && ` · LLM: ${r.llm.mode}`}
           </span>
         </CardHeader>
         <CardContent className="space-y-3">

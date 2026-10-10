@@ -12,6 +12,7 @@ from papermind.api.deps import get_engine, require_book
 from papermind.backtest.jobs import JobManager
 from papermind.backtest.runner import (
     BacktestSpec,
+    LLMMode,
     ReplaySpec,
     WalkForwardSpec,
     run_backtest,
@@ -149,6 +150,9 @@ class JobBody(BaseModel):
     test_days: int = 30
     min_trades: int = 30
     speed: float = 0.0
+    # off = take every signal (raw strategy) | fake = deterministic offline stand-in | on = the
+    # configured analyst, answers cached by prompt hash. Default off: never call a paid API by accident.
+    llm: LLMMode = "off"
 
 
 @router.post("/backtests")
@@ -171,6 +175,7 @@ def start_job(
                 day=body.day,
                 base_tf=body.base_tf,
                 speed=body.speed,
+                llm=body.llm,
             )
 
             async def job(progress: Any, cancelled: Any) -> dict[str, Any]:
@@ -189,6 +194,7 @@ def start_job(
                 train_days=body.train_days,
                 test_days=body.test_days,
                 min_trades=body.min_trades,
+                llm=body.llm,
             )
 
             async def job(progress: Any, cancelled: Any) -> dict[str, Any]:
@@ -206,6 +212,7 @@ def start_job(
                 start=body.start,
                 end=body.end,
                 min_trades=body.min_trades,
+                llm=body.llm,
             )
 
             async def job(progress: Any, cancelled: Any) -> dict[str, Any]:

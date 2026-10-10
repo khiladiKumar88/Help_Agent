@@ -15,6 +15,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from papermind.analyst.analyst import LLMAnalyst
+from papermind.analyst.factory import AnalystUnavailable, build_analyst
 from papermind.broker.paper_broker import PaperBroker
 from papermind.core.clock import Clock, RealClock
 from papermind.core.config import AppConfig, Settings
@@ -56,6 +58,10 @@ class EngineOptions:
     funding_fn: FundingFn | None = None
     strategies: dict[str, list[Strategy]] | None = None
     decider: Decider | None = None
+    # Replays/backtests pass their own provider (FakeProvider, or the real one with the response
+    # cache) so a historical run never silently burns live quota.
+    llm_provider: Any | None = None
+    build_llm: bool = True  # False => rules decider only (the explicit "LLM off" mode)
 
 
 class Engine:
@@ -102,7 +108,28 @@ class Engine:
             strategies=opts.strategies,
             trading_starts_at=opts.trading_starts_at,
         )
-        self.executor = AgentExecutor(self.bus, self.broker, self.journal, opts.decider, opts.force_execute)
+        self.analyst: LLMAnalyst | None = None
+        self.llm_error: str | None = None
+        decider = opts.decider
+        if decider is None and opts.build_llm:
+            try:
+                self.analyst = build_analyst(cfg, self.clock, self.journal, self.registry, provider=opts.llm_provider)
+            except AnalystUnavailable as exc:
+                # No silent fallback: without an analyst the agent stays out of Auto and the UI
+                # says why. Trading every signal instead would be exactly the wrong default.
+                self.llm_error = str(exc)
+                log.warning("LLM analyst unavailable: %s", exc)
+                self.journal.audit("LLM", f"analyst unavailable: {exc}", level="WARNING")
+            decider = self.analyst
+        self.executor = AgentExecutor(
+            self.bus,
+            self.broker,
+            self.journal,
+            decider,
+            opts.force_execute,
+            clock=self.clock,
+            shadow_raw=self.analyst is not None,
+        )
         self.baseline = BaselineAgent(self.bus, self.broker, self.journal, self.clock)
 
     def _live_funding(self, instrument_id: str, _ts: datetime) -> Decimal | None:
@@ -134,6 +161,7 @@ class Engine:
     async def run_timers_once(self) -> None:
         await self.watchdog.check()
         await self.broker.on_timer()
+        await self.executor.expire_cards()
 
     async def _timer_loop(self) -> None:
         while True:
@@ -147,7 +175,7 @@ class Engine:
 
     # ------------------------------------------------------------------ status
     def agent_status(self, book_id: str) -> str:
-        """Status pill: running | market_closed | halted | stale | disconnected."""
+        """Status pill: running | thinking | rate_limited | market_closed | halted | stale | disconnected."""
         if self.broker.kill_switch_engaged:
             return "halted"
         halted, _ = self.broker.halted(book_id)
@@ -162,7 +190,25 @@ class Engine:
         ids = [i for i in self.provider.instrument_ids() if self.registry.get(i).symbol in book.instruments]
         if ids and all(self.watchdog.is_stale(i) for i in ids):
             return "stale"
+        # the agent needs an LLM verdict to act, so an exhausted budget pauses it
+        if self.analyst is not None and self.analyst.paused:
+            return "rate_limited"
         return "running"
+
+    def llm_status(self) -> dict[str, Any]:
+        """What the top bar shows: provider, model and today's usage against the daily budget."""
+        if self.analyst is None:
+            return {
+                "provider": None,
+                "model": self.cfg.llm.model,
+                "calls_today": 0,
+                "daily_budget": None,
+                "enabled": False,
+                "note": self.llm_error
+                or ("LLM is switched off (llm.provider: off) — the rules agent takes every signal"),
+            }
+        st = self.analyst.status()
+        return {**st, "calls_today": st["calls"], "enabled": True, "note": None}
 
     def status(self) -> dict[str, Any]:
         return {
@@ -173,7 +219,7 @@ class Engine:
             "data": self.watchdog.snapshot(),
             "stale_after_seconds": self.cfg.data.stale_after_seconds,
             "books": {b: {"status": self.agent_status(b), "mode": self.broker.mode(b)} for b in self.cfg.books},
-            "llm": {"provider": None, "calls_today": 0, "daily_budget": None, "note": "LLM analyst arrives in Phase 3"},
+            "llm": self.llm_status(),
             "secrets": self.settings.secrets_status(),
             "scanner": {"signals": self.scanner.signals_emitted, "errors": self.scanner.errors},
         }

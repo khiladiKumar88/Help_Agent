@@ -93,6 +93,43 @@ Default crypto book: 1,000 USDT, 1% risk per trade (fees included), max 3x lever
 2 open positions, 10 trades/day, and a 3% daily loss limit. Hitting the limit halts the
 book until 00:00 UTC and flattens its positions. Edit `config/books/crypto-futures-intraday.yaml`.
 
+## The AI analyst (Phase 3)
+
+The agent asks an LLM about **one signal at a time** — never per tick — and the answer is only
+ever TAKE or SKIP. It can also ask for a *tighter* stop or a *smaller* size; anything looser is
+discarded, and the risk rules run afterwards regardless.
+
+**If anything goes wrong, the answer is no trade.** A timeout, a rate limit, invalid JSON, a
+schema violation or an exhausted daily budget all produce SKIP, logged with the reason. When the
+daily budget runs out the agent pauses and the status pill reads "Rate-limited" — it never falls
+back to trading without a verdict.
+
+Modes (top bar, per book):
+
+| Mode | What the agent does |
+|---|---|
+| **Manual** | Records and shows signals. You place every trade yourself. |
+| **Co-pilot** | Proposes signal cards with Approve / Reject. Cards expire after one signal bar. Rejections are shadow-tracked so you can see what your veto cost or saved. |
+| **Auto** | Places paper trades itself, inside the risk rules. Switching to Auto needs an explicit confirmation. |
+
+**Is the AI actually helping?** Every signal is also traded unfiltered in a separate
+`shadow_raw` wallet, so **Journal** and `/api/books/<book>/edge` can compare, under the same risk
+rules: the raw strategy (every signal), the agent (only those the analyst approved), your own
+trades, the random baseline, and the cards you rejected. If the agent isn't beating
+`raw_strategy`, the analyst isn't earning its place.
+
+Set it up: put `GEMINI_API_KEY` in `.env`, then check `llm:` in `config/default.yaml` — the model
+id, the confidence threshold (default 70) and the rate/daily limits all live there. Google shows
+your key's real free-tier limits in [AI Studio](https://aistudio.google.com/), not in its docs,
+so the shipped numbers are deliberately conservative: set them to match your account. Without a
+key the app still runs — Co-pilot and Auto are simply disabled, and **Settings** says why.
+
+Backtests and replays take an **LLM analyst** setting: *Off* (take every signal — this measures
+the strategy alone, and is the default), *Offline stand-in* (deterministic, no quota), or *Real
+analyst*. Answers are cached by prompt hash, so re-running the same range is free. A real-analyst
+run on past dates is labelled **POSSIBLE HINDSIGHT BIAS**, because the model may have seen that
+period while it was trained.
+
 ## Configuration
 
 | File | What |
@@ -102,7 +139,7 @@ book until 00:00 UTC and flattens its positions. Edit `config/books/crypto-futur
 | `config/charges/*.yaml` | Fee schedules with `source_url`, `as_of`, `verified` — **verify before trusting** |
 | `config/calendars/*.yaml` | Exchange holidays (India, Phase 5) |
 | `backend/migrations/` | Alembic migrations (run automatically on startup; your Phase-1 DB is upgraded in place) |
-| `.env` | Secrets only (Gemini, Angel One). Never committed, never logged. |
+| `.env` | Secrets only (Gemini, Angel One). Never committed, never logged, never in a prompt. |
 
 ## Tests
 
@@ -121,7 +158,9 @@ Either one runs lint + types + every test, with the backend coverage report. `ru
 
 1. **Foundation** ✅: data, risk, paper broker, journal, UI shell with manual trading
 2. **Strategies + backtesting** ✅: history store, 6 strategies, regime, scanner, baseline, backtest, walk-forward, replay
-3. LLM analyst (Gemini), Co-pilot and Auto modes, signal cards
+3. **LLM analyst** ✅: Gemini behind a swappable interface, rate limiter + daily budget, versioned
+   prompts, Co-pilot and Auto modes, shadow accounts that measure whether the AI helps, Live /
+   Journal / Settings pages
 4. Second brain (library, episodes, playbook), reflection, lesson promotion, bandit
 5. Indian markets via Angel One SmartAPI (market data only)
 6. Hardening: crypto options, news sentiment, reconnects, Docker, backups, E2E

@@ -144,9 +144,20 @@ class PaperBroker:
         return str(self._book_state[book_id]["mode"])
 
     def accounts(self, book_id: str) -> list[Account]:
-        """Accounts that exist for a book: main, plus the baseline shadow when enabled."""
+        """Accounts that exist for a book: main plus whichever shadow wallets are enabled.
+
+        Each shadow account is funded with the same starting capital and carries its own risk
+        limits and daily-loss halt, so measuring the agent never disturbs the real book.
+        """
         book = self.book(book_id)
-        return [Account.MAIN, Account.SHADOW_BASELINE] if book.baseline.enabled else [Account.MAIN]
+        out = [Account.MAIN]
+        if book.baseline.enabled:
+            out.append(Account.SHADOW_BASELINE)
+        if book.shadow_raw_strategy:
+            out.append(Account.SHADOW_RAW)
+        if book.copilot.shadow_track_rejected:
+            out.append(Account.SHADOW_REJECTED)
+        return out
 
     def halted(self, book_id: str, account: Account = Account.MAIN) -> tuple[bool, str | None]:
         if account is Account.MAIN:

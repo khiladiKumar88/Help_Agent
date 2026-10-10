@@ -168,7 +168,7 @@ export interface SystemStatus {
   data: Record<string, { stale: boolean; age_seconds: number | null }>;
   stale_after_seconds: number;
   books: Record<string, { status: AgentStatus; mode: Mode }>;
-  llm: { provider: string | null; calls_today: number; daily_budget: number | null; note?: string };
+  llm: LLMStatus;
   secrets: Record<string, boolean>;
 }
 
@@ -294,19 +294,122 @@ export interface FoldRow {
   baseline_avg_r: number | null;
 }
 
+export type CardStatus = "none" | "pending" | "approved" | "rejected" | "expired";
+
 export interface SignalRow {
   id: string;
   ts: string;
+  book_id?: string;
+  instrument_id?: string;
   strategy_id: string;
+  timeframe?: string;
   direction: "long" | "short";
   entry_ref: string;
   stop_loss: string;
   target: string | null;
   setup: string;
   decision: string;
+  decision_by?: string;
+  decision_reason?: string;
   executed: boolean;
+  trade_id?: string | null;
   risk_rule_blocked: string | null;
   regime: string | Record<string, unknown> | null;
+  context?: Record<string, unknown>;
+  params?: Record<string, number>;
+  // --- Phase 3: the analyst's verdict
+  confidence?: number | null;
+  reasoning?: string;
+  risks_noted?: string[];
+  lessons_applied?: string[];
+  adjustments?: Record<string, unknown>;
+  prompt_version?: string | null;
+  llm_call_id?: string | null;
+  // --- Co-pilot card lifecycle
+  card_status?: CardStatus;
+  card_expires_at?: string | null;
+  card_decided_at?: string | null;
+  // --- shadow links
+  baseline_trade_id?: string | null;
+  raw_trade_id?: string | null;
+  rejected_trade_id?: string | null;
+}
+
+/** A pending co-pilot card: a signal plus how long you have left to answer it. */
+export interface SignalCard extends SignalRow {
+  seconds_left: number | null;
+  expired: boolean;
+}
+
+export interface LLMCall {
+  id: string;
+  ts: string;
+  book_id: string;
+  signal_id: string | null;
+  purpose: string;
+  provider: string;
+  model: string;
+  prompt_version: string;
+  prompt_hash: string;
+  system_prompt: string;
+  prompt: string;
+  response: string;
+  ok: boolean;
+  error_reason: string | null;
+  error: string | null;
+  latency_ms: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  thought_tokens: number | null;
+  total_tokens: number | null;
+  cached: boolean;
+}
+
+export interface LLMStatus {
+  provider: string | null;
+  model: string;
+  calls_today: number;
+  daily_budget: number | null;
+  enabled: boolean;
+  note?: string | null;
+  paused?: boolean;
+  pause_reason?: string | null;
+  remaining?: number;
+  requests_per_minute?: number;
+  tokens_per_minute?: number | null;
+  input_tokens?: number;
+  output_tokens?: number;
+  errors?: number;
+  cached_hits?: number;
+  confidence_threshold?: number;
+  prompt_version?: string;
+  exhausted?: boolean;
+}
+
+export interface SignalDetail {
+  signal: SignalRow;
+  llm_call: LLMCall | null;
+  trade: TradeView | null;
+  baseline_trade: TradeView | null;
+  raw_trade: TradeView | null;
+  rejected_trade: TradeView | null;
+}
+
+export interface EdgeReport {
+  book_id: string;
+  currency: string;
+  series: Record<string, MetricsRow>;
+  signals: { total: number; taken: number; skipped: number; pending: number; blocked_by_risk: number };
+  cards: Record<string, number>;
+  note: string;
+}
+
+export interface SettingsView {
+  books: Record<string, Record<string, unknown>>;
+  llm: Record<string, unknown> & { model: string; provider: string; limits: Record<string, number | null> };
+  llm_runtime: LLMStatus;
+  data: { stale_after_seconds: number; provider: string; exchange: string };
+  secrets: Record<string, boolean>;
 }
 
 export interface BacktestResult {
@@ -326,6 +429,12 @@ export interface BacktestResult {
   trades: BtTrade[];
   signals: number;
   candles: { t: string; o: string; h: string; l: string; c: string }[];
+  llm?: {
+    mode: LLMMode;
+    description: string;
+    hindsight_risk: boolean;
+    hindsight_warning: string | null;
+  };
   folds?: FoldRow[];
   grid_size?: number;
   strategies?: string[];
@@ -347,8 +456,11 @@ export interface JobRow {
   result?: (BacktestResult & { summary: string }) | { summary: string } | null;
 }
 
+export type LLMMode = "off" | "fake" | "on";
+
 export interface JobBody {
   kind: "backtest" | "walkforward" | "replay";
+  llm?: LLMMode;
   book_id: string;
   exchange: string;
   symbol: string;

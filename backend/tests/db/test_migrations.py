@@ -20,7 +20,7 @@ from tests.conftest import T0
 def test_fresh_database_head_matches_models(tmp_path: Path) -> None:
     db = Database(f"sqlite:///{tmp_path / 'fresh.db'}")
     db.init_schema()
-    assert current_revision(db.engine) == "0002_phase2"
+    assert current_revision(db.engine) == "0003_phase3"
     with db.engine.connect() as conn:
         diffs = compare_metadata(MigrationContext.configure(conn, opts={"compare_type": True}), Base.metadata)
     assert diffs == [], f"models and migrations differ: {diffs}"
@@ -52,7 +52,7 @@ def test_legacy_phase1_database_is_stamped_and_upgraded(tmp_path: Path) -> None:
     assert current_revision(db.engine) is None
 
     upgrade_to_head(db.engine)
-    assert current_revision(db.engine) == "0002_phase2"
+    assert current_revision(db.engine) == "0003_phase3"
     tables = set(inspect(db.engine).get_table_names())
     assert {"signals", "backtest_runs", "trades"} <= tables
     with db.session() as s:

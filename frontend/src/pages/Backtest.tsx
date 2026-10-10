@@ -8,7 +8,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Label } from "@/components/ui/input";
 import { Segmented } from "@/components/ui/segmented";
 import { api, ApiError } from "@/lib/api";
-import type { BacktestResult, Coverage, JobBody, JobRow, StrategyInfo } from "@/lib/types";
+import type {
+  LLMMode, BacktestResult, Coverage, JobBody, JobRow, StrategyInfo } from "@/lib/types";
 import { isFinished, useJob } from "@/lib/useJob";
 import { fmtDateTime, fmtNum } from "@/lib/utils";
 import { selectBookId, useApp } from "@/store/app";
@@ -34,6 +35,7 @@ export function BacktestPage() {
   const [coverage, setCoverage] = useState<Coverage | null>(null);
   const [dlStart, setDlStart] = useState(isoDay(Date.now() - 200 * DAY));
   const [tab, setTab] = useState<Tab>("backtest");
+  const [llmMode, setLlmMode] = useState<LLMMode>("off");
   const [runId, setRunId] = useState<string | null>(null);
   const [dlRunId, setDlRunId] = useState<string | null>(null);
   const [recent, setRecent] = useState<JobRow[]>([]);
@@ -108,7 +110,7 @@ export function BacktestPage() {
     return <p className="p-6 text-sm text-muted-foreground">Book {bookId} is not configured — pick Crypto › Futures › Intraday.</p>;
   }
 
-  const common = { book_id: bookId, exchange, symbol, base_tf: tf };
+  const common = { book_id: bookId, exchange, symbol, base_tf: tf, llm: llmMode };
   const result = job?.status === "done" && job.result && "agent" in job.result ? (job.result as BacktestResult) : null;
   const tfOk = TF_SECONDS[signalTf]! % TF_SECONDS[tf]! === 0 && TF_SECONDS[tf]! <= TF_SECONDS[signalTf]!;
 
@@ -167,6 +169,19 @@ export function BacktestPage() {
             ]}
           />
           <span className="text-xs text-muted-foreground">signal timeframe {signalTf}</span>
+          <div className="mt-2 flex flex-wrap items-end gap-3">
+            <Segmented<LLMMode>
+              label="LLM analyst"
+              value={llmMode}
+              onChange={setLlmMode}
+              options={[
+                { value: "off", label: "Off", title: "Take every signal — this measures the raw strategy" },
+                { value: "fake", label: "Offline stand-in", title: "Deterministic, costs no quota" },
+                { value: "on", label: "Real analyst", title: "Uses your LLM quota; answers are cached by prompt" },
+              ]}
+            />
+            <span className="max-w-md text-xs text-muted-foreground">{LLM_MODE_NOTE[llmMode]}</span>
+          </div>
         </CardHeader>
         <CardContent>
           {tab === "backtest" && <BacktestForm strategies={strategies} disabled={!symbol || !tfOk} onRun={(b) => start({ ...common, ...b })} />}
@@ -195,6 +210,12 @@ export function BacktestPage() {
     </div>
   );
 }
+
+export const LLM_MODE_NOTE: Record<LLMMode, string> = {
+  off: "No LLM: every signal is taken, so the result is the strategy on its own.",
+  fake: "A deterministic offline stand-in decides. Fast, repeatable, and it spends no quota.",
+  on: "The real analyst decides each signal and spends your daily budget. Answers are cached by prompt, so re-running the same range is free — but a model may have seen this period in training, so treat the result as a dry run.",
+};
 
 const TF_SECONDS: Record<string, number> = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400 };
 

@@ -1,8 +1,22 @@
 """Agent pipeline: Signal -> Decider -> (mode) -> sizing -> RiskManager (inside broker.submit).
 
-Phase 2 uses RuleDecider (takes every strategy signal). Phase 3 plugs the LLM analyst in as
-another Decider; whatever it says, orders still pass through the pure-code risk rules.
-The executor only places orders in Auto mode (or when forced, e.g. backtests/replays).
+Deciders: `RuleDecider` takes every strategy signal; `analyst.LLMAnalyst` asks the LLM. Whatever
+a decider says, orders still pass through the pure-code risk rules, and a decider may only make
+an order STRICTER (tighter stop, smaller size) — never looser.
+
+Mode routing (per book):
+  * Manual  — signals are recorded and shown; the agent places nothing.
+  * Co-pilot — a TAKE becomes a pending card the human approves or rejects. Cards expire after
+    `copilot.card_ttl_bars`. A rejected card is shadow-traded in `shadow_rejected`, so we learn
+    what the human's veto cost or saved.
+  * Auto    — the agent places the trade itself, inside the risk rules.
+
+Shadow accounts make the LLM measurable:
+  * `shadow_raw`      — EVERY signal, unfiltered (only when an LLM filter is actually in play;
+                        with the LLM off the agent already IS the raw strategy).
+  * `shadow_baseline` — random entries at the same frequency.
+  * `shadow_rejected` — cards the human rejected.
+Each has its own wallet and its own risk limits, so they never interfere with `main`.
 """
 
 from __future__ import annotations
@@ -10,9 +24,9 @@ from __future__ import annotations
 import logging
 import random
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Protocol
+from typing import Any, Protocol
 
 from papermind.broker.paper_broker import PaperBroker
 from papermind.core.clock import Clock
@@ -23,6 +37,12 @@ from papermind.core.types import Account, Actor, Candle, Decision, Direction, Or
 from papermind.data.candles import tf_seconds
 from papermind.journal.service import Journal
 from papermind.risk.manager import RiskDecision
+
+CARD_PENDING = "pending"
+CARD_APPROVED = "approved"
+CARD_REJECTED = "rejected"
+CARD_EXPIRED = "expired"
+CARD_NONE = "none"
 
 log = logging.getLogger(__name__)
 
@@ -38,8 +58,12 @@ class RuleDecider:
         return Decision(take=True, by="rules", reason=f"strategy {signal.strategy_id} signal (rules-only agent)")
 
 
-def size_order(broker: PaperBroker, req: OrderRequest) -> Decimal:
-    """Largest qty allowed by the per-trade risk cap AND available margin (then the risk rules re-check)."""
+def size_order(broker: PaperBroker, req: OrderRequest, size_factor: float | None = None) -> Decimal:
+    """Largest qty allowed by the per-trade risk cap AND available margin (then the risk rules re-check).
+
+    `size_factor` is the analyst's shrink request. It can only ever reduce the size: values of 1
+    or more are ignored, so an LLM cannot talk its way into a bigger position.
+    """
     book = broker.book(req.book_id)
     ctx = broker.build_context(req)
     inst = ctx.instrument
@@ -47,6 +71,8 @@ def size_order(broker: PaperBroker, req: OrderRequest) -> Decimal:
     if inst is None or entry is None or entry <= 0:
         return ZERO
     qty = broker.risk.max_qty_for_risk(ctx, req)
+    if size_factor is not None and 0 < size_factor < 1:
+        qty = round_to_step(qty * Decimal(str(size_factor)), inst.qty_step, "down")
     available = ctx.equity - ctx.used_margin
     if available <= 0:
         return ZERO
@@ -75,6 +101,7 @@ async def place_sized(
     target: Decimal | None,
     signal_id: str | None,
     note: str,
+    size_factor: float | None = None,
 ) -> tuple[RiskDecision | None, str | None, str]:
     """Size and submit. Returns (risk decision, trade id, message)."""
     base = OrderRequest(
@@ -90,7 +117,7 @@ async def place_sized(
         signal_id=signal_id,
         note=note,
     )
-    qty = size_order(broker, base)
+    qty = size_order(broker, base, size_factor)
     if qty <= 0:
         return None, None, "position size rounds to zero under the risk/margin limits"
     decision, trade = await broker.submit(base.model_copy(update={"qty": qty}))
@@ -98,6 +125,8 @@ async def place_sized(
 
 
 class AgentExecutor:
+    """Signal -> decider -> mode routing. Also runs the shadow accounts that measure the agent."""
+
     def __init__(
         self,
         bus: EventBus,
@@ -105,15 +134,24 @@ class AgentExecutor:
         journal: Journal,
         decider: Decider | None = None,
         force_execute: bool = False,
+        clock: Clock | None = None,
+        shadow_raw: bool = False,
     ) -> None:
         self.bus = bus
         self.broker = broker
         self.journal = journal
         self.decider: Decider = decider or RuleDecider()
         self.force_execute = force_execute
+        self.clock = clock or broker.clock
+        # only worth running when something actually filters the signals (i.e. an LLM analyst)
+        self.shadow_raw = shadow_raw
         bus.subscribe(Topic.SIGNAL, self.on_signal)
 
+    # ------------------------------------------------------------------ signal
     async def on_signal(self, sig: Signal) -> None:
+        # The unfiltered strategy is traded FIRST and unconditionally, so it is never contingent
+        # on the decider — that is the whole point of the comparison.
+        await self._shadow_raw(sig)
         try:
             decision = await self.decider.decide(sig)
         except Exception as exc:  # fail safe: decider error => NO TRADE
@@ -128,26 +166,149 @@ class AgentExecutor:
         await self.bus.publish(Topic.AGENT_DECISION, {"signal": sig, "decision": decision})
         if not decision.take:
             return
-        if not (self.force_execute or self.broker.mode(sig.book_id) == Mode.AUTO.value):
-            return  # Manual / Co-pilot: analysis only here (Co-pilot approvals arrive in Phase 3)
+        mode = self.broker.mode(sig.book_id)
+        if self.force_execute or mode == Mode.AUTO.value:
+            await self._execute(sig, decision, Account.MAIN, Actor.AGENT)
+            return
+        if mode == Mode.COPILOT.value:
+            await self._open_card(sig, decision)
+        # Manual: analysis only.
+
+    # ------------------------------------------------------------------ execution
+    async def _execute(
+        self, sig: Signal, decision: Decision, account: Account, actor: Actor, note: str | None = None
+    ) -> str | None:
+        stop = decision.stop_loss if decision.stop_loss is not None else sig.stop_loss
         rd, trade_id, _msg = await place_sized(
             self.broker,
             sig.book_id,
-            Account.MAIN,
-            Actor.AGENT,
+            account,
+            actor,
             sig.instrument_id,
             sig.direction,
-            sig.stop_loss,
+            stop,
             sig.target,
             sig.id,
-            f"{sig.strategy_id}: {sig.setup}"[:500],
+            note or f"{sig.strategy_id}: {sig.setup}"[:500],
+            size_factor=decision.size_factor,
+        )
+        if account is Account.MAIN:
+            self.journal.update_signal(
+                sig.id,
+                executed=trade_id is not None,
+                trade_id=trade_id,
+                risk_rule_blocked=None if trade_id else (rd.failed_rule_id if rd else "SIZE_ZERO"),
+            )
+        return trade_id
+
+    async def _shadow_raw(self, sig: Signal) -> None:
+        """Trade every signal in `shadow_raw` — the control group for the LLM TAKE/SKIP filter."""
+        if not self.shadow_raw or not self.broker.book(sig.book_id).shadow_raw_strategy:
+            return
+        try:
+            trade_id = await self._execute(
+                sig,
+                Decision(take=True, by="raw", reason="unfiltered strategy signal"),
+                Account.SHADOW_RAW,
+                Actor.AGENT,
+                note=f"raw {sig.strategy_id}",
+            )
+        except Exception:
+            log.exception("shadow-raw entry failed")
+            return
+        if trade_id:
+            self.journal.update_signal(sig.id, raw_trade_id=trade_id)
+
+    # ------------------------------------------------------------------ co-pilot cards
+    def _card_deadline(self, sig: Signal) -> datetime:
+        cp = self.broker.book(sig.book_id).copilot
+        seconds = cp.card_ttl_seconds
+        if seconds is None:
+            seconds = cp.card_ttl_bars * tf_seconds(sig.timeframe)
+        return self.clock.now() + timedelta(seconds=seconds)
+
+    async def _open_card(self, sig: Signal, decision: Decision) -> None:
+        self.journal.update_signal(
+            sig.id, card_status=CARD_PENDING, card_expires_at=self._card_deadline(sig), card_decided_at=None
+        )
+        self.journal.audit(
+            "COPILOT",
+            f"card awaiting approval: {sig.strategy_id} {sig.direction} {sig.instrument_id}",
+            book_id=sig.book_id,
+            payload={"signal_id": sig.id, "confidence": decision.confidence},
+        )
+        await self.bus.publish(Topic.AGENT_DECISION, {"signal": sig, "decision": decision, "card": CARD_PENDING})
+
+    async def resolve_card(self, signal_id: str, approve: bool) -> dict[str, Any]:
+        """Human verdict on a pending card. Approving places the trade; rejecting shadow-tracks it."""
+        row = self.journal.get_signal(signal_id)
+        if row is None:
+            raise CardError("unknown signal")
+        if row["card_status"] != CARD_PENDING:
+            raise CardError(f"this card is already {row['card_status']}")
+        expires = row.get("card_expires_at")
+        if expires is not None and self.clock.now() > expires:
+            self.journal.update_signal(signal_id, card_status=CARD_EXPIRED, card_decided_at=self.clock.now())
+            raise CardError("this card has expired")
+        sig = self.journal.signal_from_row(row)
+        decision = Decision(
+            take=approve,
+            by="human",
+            reason=f"human {'approved' if approve else 'rejected'} the agent card",
+            confidence=row.get("confidence"),
         )
         self.journal.update_signal(
-            sig.id,
-            executed=trade_id is not None,
-            trade_id=trade_id,
-            risk_rule_blocked=None if trade_id else (rd.failed_rule_id if rd else "SIZE_ZERO"),
+            signal_id,
+            card_status=CARD_APPROVED if approve else CARD_REJECTED,
+            card_decided_at=self.clock.now(),
         )
+        if approve:
+            trade_id = await self._execute(
+                sig, decision, Account.MAIN, Actor.AGENT, note=f"approved: {sig.setup}"[:500]
+            )
+            return {"signal_id": signal_id, "card_status": CARD_APPROVED, "trade_id": trade_id}
+        trade_id = await self._shadow_rejected(sig)
+        return {"signal_id": signal_id, "card_status": CARD_REJECTED, "shadow_trade_id": trade_id}
+
+    async def _shadow_rejected(self, sig: Signal) -> str | None:
+        """What the rejected card would have done — learning data, in its own wallet."""
+        if not self.broker.book(sig.book_id).copilot.shadow_track_rejected:
+            return None
+        try:
+            trade_id = await self._execute(
+                sig,
+                Decision(take=True, by="human", reason="shadow of a rejected card"),
+                Account.SHADOW_REJECTED,
+                Actor.AGENT,
+                note=f"rejected card {sig.strategy_id}",
+            )
+        except Exception:
+            log.exception("shadow-rejected entry failed")
+            return None
+        if trade_id:
+            self.journal.update_signal(sig.id, rejected_trade_id=trade_id)
+        return trade_id
+
+    async def expire_cards(self) -> int:
+        """Called from the engine timer: mark cards whose deadline has passed."""
+        now = self.clock.now()
+        expired = 0
+        for row in self.journal.pending_cards():
+            deadline = row.get("card_expires_at")
+            if deadline is not None and now > deadline:
+                self.journal.update_signal(row["id"], card_status=CARD_EXPIRED, card_decided_at=now)
+                self.journal.audit(
+                    "COPILOT",
+                    f"card expired unanswered: {row['strategy_id']} {row['direction']} {row['instrument_id']}",
+                    book_id=row["book_id"],
+                    payload={"signal_id": row["id"]},
+                )
+                expired += 1
+        return expired
+
+
+class CardError(ValueError):
+    """A co-pilot card cannot be resolved (unknown, already decided, or expired)."""
 
 
 @dataclass

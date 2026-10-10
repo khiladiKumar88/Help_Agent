@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     papermind_config_dir: Path = REPO_ROOT / "config"
     papermind_db_url: str | None = None
     papermind_crypto_provider: str | None = None  # override data.crypto.provider (ccxt|simulated)
+    papermind_llm_provider: str | None = None  # override llm.provider (gemini|fake|off)
     papermind_history_db_url: str | None = None
     papermind_vault_dir: Path = REPO_ROOT / "vault"
     log_level: str = "INFO"
@@ -156,6 +157,14 @@ class BaselineConfig(_Strict):
     max_delay_bars: int = 4  # entry happens 0..N signal bars after the agent's decision (random)
 
 
+class CopilotConfig(_Strict):
+    """Co-pilot signal cards: how long the human has to approve before the card expires."""
+
+    card_ttl_bars: float = 1.0  # expiry = this many signal-timeframe bars after the signal
+    card_ttl_seconds: float | None = None  # absolute override; wins over card_ttl_bars when set
+    shadow_track_rejected: bool = True  # record what a rejected card would have done
+
+
 class BookConfig(_Strict):
     id: str
     market: Market
@@ -176,6 +185,8 @@ class BookConfig(_Strict):
     strategies: list[StrategySpec] = Field(default_factory=list)
     scanner: ScannerConfig = ScannerConfig()
     baseline: BaselineConfig = BaselineConfig()
+    copilot: CopilotConfig = CopilotConfig()
+    shadow_raw_strategy: bool = True  # also trade EVERY signal in shadow_raw, to measure the LLM's filter
 
     @model_validator(mode="after")
     def _check_id(self) -> BookConfig:
@@ -252,6 +263,50 @@ class DataConfig(_Strict):
     crypto: CryptoDataConfig = CryptoDataConfig()
 
 
+class LLMRateLimits(_Strict):
+    """Rate/budget limits for the LLM provider.
+
+    Google does NOT publish the free-tier RPM/TPM/RPD in its docs any more — each account sees
+    its own limits in AI Studio — so these are config, never hardcoded guesses. The defaults are
+    deliberately conservative; set them to the numbers AI Studio shows for YOUR key.
+    """
+
+    requests_per_minute: int = 10  # token-bucket refill rate
+    burst: int | None = None  # bucket capacity; defaults to requests_per_minute
+    tokens_per_minute: int | None = 250_000  # None = don't track input tokens per minute
+    requests_per_day: int = 200  # hard daily call budget; the agent PAUSES when it is used up
+    max_retries: int = 3  # retries on 429 / 5xx (exponential backoff)
+    backoff_base_seconds: float = 2.0
+    backoff_max_seconds: float = 32.0
+
+    @model_validator(mode="after")
+    def _check(self) -> LLMRateLimits:
+        if self.requests_per_minute <= 0 or self.requests_per_day <= 0:
+            raise ValueError("requests_per_minute and requests_per_day must be positive")
+        if self.burst is not None and self.burst < 1:
+            raise ValueError("burst must be at least 1")
+        return self
+
+
+class LLMConfig(_Strict):
+    """The analyst's LLM. `model` and the limits come from here — never hardcoded in code."""
+
+    provider: Literal["gemini", "fake", "off"] = "gemini"
+    # Current free-tier Flash model (verified against Google's pricing page, 2026-10-01).
+    # Any id the provider accepts works; this is the only place it is named.
+    model: str = "gemini-3.8-flash"
+    api_key_env: str = "GEMINI_API_KEY"  # read from .env only; never logged, never in a prompt
+    timeout_seconds: float = 30.0
+    temperature: float = 0.2
+    thinking_level: Literal["minimal", "low", "medium", "high"] = "low"
+    max_output_tokens: int = 1024
+    confidence_threshold: int = 70  # below this, the answer is SKIP
+    prompt_version: str = "analyst_v1"  # template under analyst/prompts/, stored with each decision
+    cache_responses: bool = True  # cache by prompt hash so replays don't burn quota
+    log_prompts: bool = True  # store the full prompt with each call record
+    limits: LLMRateLimits = LLMRateLimits()
+
+
 class ServerConfig(_Strict):
     host: str = "127.0.0.1"
     port: int = 8000
@@ -265,6 +320,7 @@ class AppConfig(_Strict):
     equity_snapshot_seconds: int = 60
     books: dict[str, BookConfig] = Field(default_factory=dict)
     charges: dict[str, ChargesConfig] = Field(default_factory=dict)
+    llm: LLMConfig = LLMConfig()
 
     def book(self, book_id: str) -> BookConfig:
         try:
@@ -314,6 +370,8 @@ def load_config(settings: Settings | None = None) -> AppConfig:
         raw.setdefault("data", {})["history_db_url"] = settings.papermind_history_db_url
     if settings.papermind_crypto_provider:
         raw.setdefault("data", {}).setdefault("crypto", {})["provider"] = settings.papermind_crypto_provider
+    if settings.papermind_llm_provider:
+        raw.setdefault("llm", {})["provider"] = settings.papermind_llm_provider
 
     cfg = AppConfig.model_validate(raw)
     for book in cfg.books.values():

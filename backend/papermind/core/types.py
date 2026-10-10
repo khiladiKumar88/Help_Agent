@@ -45,9 +45,10 @@ class Actor(StrEnum):
 
 
 class Account(StrEnum):
-    MAIN = "main"
-    SHADOW_BASELINE = "shadow_baseline"
-    SHADOW_REJECTED = "shadow_rejected"
+    MAIN = "main"  # human + agent share this wallet
+    SHADOW_BASELINE = "shadow_baseline"  # random-entry benchmark
+    SHADOW_REJECTED = "shadow_rejected"  # Co-pilot cards the human rejected
+    SHADOW_RAW = "shadow_raw"  # EVERY strategy signal, unfiltered — measures what the LLM's filter adds
 
 
 class OrderType(StrEnum):
@@ -282,9 +283,17 @@ class Signal(BaseModel):
 
 
 class Decision(BaseModel):
-    """Agent verdict on a signal. Phase 2: rules-only; Phase 3 adds the LLM analyst."""
+    """Agent verdict on a signal. Phase 2: rules-only; Phase 3 adds the LLM analyst.
+
+    `stop_loss` and `size_factor` carry the analyst's STRICTER-ONLY adjustments; they are
+    validated in `analyst.schema.apply_adjustments` before they ever get here, and the pure-code
+    risk rules still run afterwards.
+    """
 
     take: bool
     by: str  # rules | llm | human
     reason: str
     confidence: int | None = None
+    stop_loss: Decimal | None = None  # tighter stop the analyst asked for (never looser)
+    size_factor: float | None = None  # shrink factor in (0, 1)
+    cached: bool = False  # the verdict came from the prompt-hash cache (no quota spent)

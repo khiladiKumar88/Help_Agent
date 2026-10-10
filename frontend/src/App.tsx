@@ -4,6 +4,9 @@ import { TopBar } from "@/components/TopBar";
 import { connectWs } from "@/lib/ws";
 import { BacktestPage } from "@/pages/Backtest";
 import { Home } from "@/pages/Home";
+import { Journal } from "@/pages/Journal";
+import { Live } from "@/pages/Live";
+import { Settings } from "@/pages/Settings";
 import { cn } from "@/lib/utils";
 
 const PAGES = [
@@ -16,7 +19,7 @@ const PAGES = [
   { id: "settings", label: "Settings", phase: 3 },
 ] as const;
 
-const READY = new Set<string>(["home", "backtest"]);
+const READY = new Set<string>(["home", "live", "journal", "backtest", "settings"]);
 
 export default function App() {
   const [page, setPage] = useState<(typeof PAGES)[number]["id"]>("home");
@@ -44,7 +47,10 @@ export default function App() {
       </nav>
       <main>
         {page === "home" && <Home />}
+        {page === "live" && <Live />}
+        {page === "journal" && <Journal />}
         {page === "backtest" && <BacktestPage />}
+        {page === "settings" && <Settings />}
       </main>
     </div>
   );

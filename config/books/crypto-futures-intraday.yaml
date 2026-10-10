@@ -45,3 +45,11 @@ baseline:              # random-entry benchmark in a separate shadow wallet (sam
   enabled: true
   seed: 7
   max_delay_bars: 4
+# --- Phase 3: Co-pilot cards and the shadow book that measures the analyst's filter.
+copilot:
+  card_ttl_bars: 1               # a card expires one signal bar (15m) after it appears
+  # card_ttl_seconds: 300        # absolute override, if you prefer a fixed deadline
+  shadow_track_rejected: true    # record what a card you rejected would have done
+shadow_raw_strategy: true        # also trade EVERY signal in `shadow_raw`, so we can see whether
+                                 # the analyst's TAKE/SKIP filter beats taking everything.
+                                 # Only runs when an analyst is actually filtering.

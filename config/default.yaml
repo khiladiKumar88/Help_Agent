@@ -28,3 +28,27 @@ data:
       start_prices:
         BTC/USDT:USDT: 65000
         ETH/USDT:USDT: 3000
+
+# --- Phase 3: the LLM analyst. It judges one scanner signal at a time and can only ever make an
+# order STRICTER. It never touches the risk rules, and any failure means NO TRADE.
+llm:
+  provider: gemini                 # gemini | fake (deterministic, offline) | off (take every signal)
+  model: gemini-3.8-flash          # current free-tier Flash model; any id the provider accepts
+  api_key_env: GEMINI_API_KEY      # read from .env only — never logged, never put in a prompt
+  timeout_seconds: 30
+  temperature: 0.2
+  thinking_level: low              # minimal | low | medium | high
+  max_output_tokens: 1024
+  confidence_threshold: 70         # below this the answer is treated as SKIP
+  prompt_version: analyst_v1       # template in backend/papermind/analyst/prompts/
+  cache_responses: true            # cache by prompt hash so re-running a replay costs no quota
+  log_prompts: true                # store the full prompt with each call record
+  limits:
+    # Google does NOT publish the free-tier numbers any more — your own limits are shown in
+    # Google AI Studio. These defaults are deliberately conservative: set them to YOUR key's.
+    requests_per_minute: 10
+    tokens_per_minute: 250000      # null to stop tracking input tokens per minute
+    requests_per_day: 200          # hard daily budget; the agent PAUSES when it is used up
+    max_retries: 3                 # retries on 429 / 5xx, exponential backoff with jitter
+    backoff_base_seconds: 2
+    backoff_max_seconds: 32

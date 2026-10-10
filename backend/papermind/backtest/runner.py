@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field, model_validator
@@ -34,6 +34,7 @@ from papermind.data.candles import CandleBuilder, tf_seconds
 from papermind.data.history import HistoryStore, funding_rate_at
 from papermind.instruments.registry import instrument_from_ccxt_market
 from papermind.journal.entities import Trade
+from papermind.llm.fake import FakeProvider
 from papermind.strategies.base import ParamValue, Strategy, expand_grid
 from papermind.strategies.builtin import STRATEGIES, make_strategy
 
@@ -50,6 +51,15 @@ class BacktestError(ValueError):
 # ============================================================================ specs
 
 
+LLMMode = Literal["off", "fake", "on"]
+
+LLM_MODE_HELP = {
+    "off": "LLM off: every signal is taken (this measures the raw strategy).",
+    "fake": "Deterministic offline stand-in for the LLM — fast, and it costs no quota.",
+    "on": "The configured LLM analyst decides each signal. Answers are cached by prompt hash.",
+}
+
+
 class _RangeSpec(BaseModel):
     book_id: str
     exchange: str
@@ -57,6 +67,8 @@ class _RangeSpec(BaseModel):
     base_tf: str = "5m"
     start: datetime
     end: datetime
+    # Default off: a historical run must never silently call a paid API.
+    llm: LLMMode = "off"
 
     @model_validator(mode="after")
     def _check(self) -> _RangeSpec:
@@ -88,6 +100,7 @@ class ReplaySpec(BaseModel):
     day: datetime  # any time on the day to replay (book's trading-day timezone)
     base_tf: str = "5m"
     speed: float = 0.0  # 0 = as fast as possible; N = N x real time
+    llm: LLMMode = "off"
 
 
 # ============================================================================ single engine run
@@ -142,6 +155,7 @@ async def run_engine(
     speed: float = 0.0,
     progress: Callable[[float], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    llm_mode: LLMMode | None = None,
 ) -> RunOutput:
     from papermind.engine import Engine, EngineOptions  # local import: engine imports the scanner
 
@@ -183,6 +197,8 @@ async def run_engine(
         )
         return holder["p"]
 
+    mode = llm_mode or rng.llm
+    llm_provider = FakeProvider() if mode == "fake" else None
     engine = Engine(
         cfg2,
         Settings(_env_file=None),
@@ -196,8 +212,14 @@ async def run_engine(
             persist_candles=False,
             funding_fn=lambda _i, ts: funding_rate_at(funding, ts),
             strategies={book.id: strategies},
+            build_llm=mode != "off",
+            llm_provider=llm_provider,
         ),
     )
+    if mode != "off" and engine.analyst is None:
+        raise BacktestError(
+            f"this run asked for the LLM analyst but it is unavailable: {engine.llm_error or 'not configured'}"
+        )
     engine.builder.timeframes = sorted(set(CandleBuilder().timeframes) | {signal_tf}, key=tf_seconds)
     for s in strategies:
         s.reset()
@@ -339,6 +361,26 @@ def plain_english(
     return text
 
 
+def llm_report(mode: LLMMode) -> dict[str, Any]:
+    """What the UI shows about the LLM's part in a historical run.
+
+    A model may well have seen this period during training, so an LLM-in-the-loop result on past
+    dates is NOT evidence of a live edge. We say so rather than letting the number speak.
+    """
+    return {
+        "mode": mode,
+        "description": LLM_MODE_HELP[mode],
+        "hindsight_risk": mode == "on",
+        "hindsight_warning": (
+            "The analyst judged dates that are already in the past, and the model may have seen "
+            "this period while it was trained. Treat this as a dry run of the pipeline, not as "
+            "evidence of an edge."
+        )
+        if mode == "on"
+        else None,
+    }
+
+
 def _report(
     kind: str,
     cfg: AppConfig,
@@ -348,6 +390,7 @@ def _report(
     min_trades: int,
     label: str,
     extra: dict[str, Any] | None = None,
+    llm_mode: LLMMode = "off",
 ) -> dict[str, Any]:
     ccy = book.currency
     ppy = 252.0 if book.market.value == "india" else 365.0
@@ -393,6 +436,7 @@ def _report(
                 _trade_row(t) for t in sorted(agent_trades + base_trades, key=lambda t: t.opened_at or t.created_at)
             ][:1000],
             "signals": sum(len(o.signals) for o in outs),
+            "llm": llm_report(llm_mode),
             "candles": [
                 {"t": c.ts_open.isoformat(), "o": str(c.open), "h": str(c.high), "l": str(c.low), "c": str(c.close)}
                 for c in all_candles
@@ -439,7 +483,16 @@ async def run_backtest(
     if book.market not in strat.markets:
         raise BacktestError(f"{strat.name} does not support {book.market}")
     out = await run_engine(
-        cfg, store, spec, [strat], True, None, 0.0, (lambda f: progress(f, "running")) if progress else None, cancelled
+        cfg,
+        store,
+        spec,
+        [strat],
+        True,
+        None,
+        0.0,
+        (lambda f: progress(f, "running")) if progress else None,
+        cancelled,
+        llm_mode=spec.llm,
     )
     fitted = bool(spec.params) and spec.params != {k: strat.default_params[k] for k in spec.params}
     label = f"{strat.name}, {spec.start:%Y-%m-%d} → {spec.end:%Y-%m-%d} " + (
@@ -456,6 +509,7 @@ async def run_backtest(
         spec.min_trades,
         label,
         {"params": out.params, "strategy_id": strat.id},
+        llm_mode=spec.llm,
     )
 
 
@@ -501,7 +555,9 @@ async def run_walkforward(
             train = _RangeSpec(
                 book_id=spec.book_id, exchange=spec.exchange, symbol=spec.symbol, base_tf=spec.base_tf, start=a, end=b
             )
-            o = await run_engine(cfg, store, train, [cls(params)], baseline=False, cancelled=cancelled)
+            # Parameter selection is mechanical, so training never calls the LLM: it would
+            # multiply quota by (folds x grid) for no gain in how the parameters are chosen.
+            o = await run_engine(cfg, store, train, [cls(params)], baseline=False, cancelled=cancelled, llm_mode="off")
             m = trade_metrics(o.agent_trades, book.starting_capital)
             done += 1
             if m.trades >= spec.min_train_trades and m.avg_r is not None:
@@ -518,7 +574,14 @@ async def run_walkforward(
             book_id=spec.book_id, exchange=spec.exchange, symbol=spec.symbol, base_tf=spec.base_tf, start=b, end=c
         )
         o = await run_engine(
-            cfg, store, test, [cls(chosen)], baseline=True, baseline_seed=book.baseline.seed + k, cancelled=cancelled
+            cfg,
+            store,
+            test,
+            [cls(chosen)],
+            baseline=True,
+            baseline_seed=book.baseline.seed + k,
+            cancelled=cancelled,
+            llm_mode=spec.llm,
         )
         done += 1
         outs.append(o)
@@ -555,6 +618,7 @@ async def run_walkforward(
         spec.min_trades,
         label,
         {"folds": fold_rows, "strategy_id": cls.id, "grid_size": len(grid)},
+        llm_mode=spec.llm,
     )
 
 
@@ -578,7 +642,13 @@ async def run_replay(
     strategies = [s for s in strategies if book.market in s.markets]
     start, end = day_bounds(spec.day, book.trading_day_tz)
     rng = _RangeSpec(
-        book_id=spec.book_id, exchange=spec.exchange, symbol=spec.symbol, base_tf=spec.base_tf, start=start, end=end
+        book_id=spec.book_id,
+        exchange=spec.exchange,
+        symbol=spec.symbol,
+        base_tf=spec.base_tf,
+        start=start,
+        end=end,
+        llm=spec.llm,
     )
     out = await run_engine(
         cfg,
@@ -590,6 +660,7 @@ async def run_replay(
         spec.speed,
         (lambda f: progress(f, "replaying")) if progress else None,
         cancelled,
+        llm_mode=spec.llm,
     )
     label = f"Replay of {start:%Y-%m-%d} ({book.trading_day_tz}) with {', '.join(s.id for s in strategies)}"
     return _report(
@@ -601,6 +672,7 @@ async def run_replay(
         MIN_TRADES_DEFAULT,
         label,
         {
+            "llm_mode": spec.llm,
             "strategies": [s.id for s in strategies],
             "signal_list": [
                 jdict(
@@ -616,8 +688,15 @@ async def run_replay(
                             "target",
                             "setup",
                             "decision",
+                            "decision_by",
+                            "decision_reason",
                             "executed",
                             "risk_rule_blocked",
+                            # the analyst's verdict: a replay signal card is meant to be read
+                            "confidence",
+                            "reasoning",
+                            "risks_noted",
+                            "prompt_version",
                         )
                     }
                     | {"regime": s["regime"].get("label")}
@@ -625,4 +704,5 @@ async def run_replay(
                 for s in out.signals
             ][:500],
         },
+        llm_mode=spec.llm,
     )

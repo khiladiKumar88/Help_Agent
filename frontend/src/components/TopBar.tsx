@@ -40,6 +40,21 @@ export function TopBar() {
   const pill: keyof typeof STATUS = conn !== "open" ? "offline" : !configured ? "not_configured" : bookStatus!.status;
   const mode: Mode = books[id]?.mode ?? bookStatus?.mode ?? "manual";
   const killEngaged = Boolean(status?.kill_switch?.engaged);
+  const llm = status?.llm;
+  // Co-pilot and Auto need a working analyst: without verdicts the agent would trade blind.
+  const agentModes = Boolean(llm?.enabled);
+  const agentHint = agentModes ? undefined : (llm?.note ?? "Needs the LLM analyst");
+  const [confirmAuto, setConfirmAuto] = useState(false);
+  const [modeError, setModeError] = useState<string | null>(null);
+
+  const changeMode = (next: Mode) => {
+    setModeError(null);
+    if (next === "auto") {
+      setConfirmAuto(true);
+      return;
+    }
+    void api.setMode(id, next).catch((e) => setModeError(e instanceof ApiError ? e.message : "Could not change mode"));
+  };
 
   return (
     <header className="sticky top-0 z-40 flex flex-wrap items-center gap-3 border-b bg-background/95 px-4 py-2 backdrop-blur">
@@ -80,21 +95,99 @@ export function TopBar() {
       <Segmented<Mode>
         label="Mode"
         value={mode}
-        onChange={(v) => void api.setMode(id, v).catch(() => undefined)}
+        onChange={changeMode}
         options={[
           { value: "manual", label: "Manual", disabled: !configured },
-          { value: "copilot", label: "Co-pilot", disabled: true, title: "Arrives in Phase 3 (LLM analyst)" },
-          { value: "auto", label: "Auto", disabled: true, title: "Arrives in Phase 3 (LLM analyst)" },
+          { value: "copilot", label: "Co-pilot", disabled: !configured || !agentModes, title: agentHint },
+          { value: "auto", label: "Auto", disabled: !configured || !agentModes, title: agentHint },
         ]}
       />
       <div className="ml-auto flex items-center gap-3">
         <StatusPill status={pill} />
-        <span className="text-xs text-muted-foreground" title={status?.llm.note}>
-          LLM {status?.llm.calls_today ?? 0}/{status?.llm.daily_budget ?? "—"}
-        </span>
+        <LlmQuota />
         <KillSwitch engaged={killEngaged} disabled={conn !== "open"} />
       </div>
+      {modeError && (
+        <p role="alert" className="w-full text-xs text-loss">
+          {modeError}
+        </p>
+      )}
+      <AutoConfirm
+        open={confirmAuto}
+        bookId={id}
+        onClose={() => setConfirmAuto(false)}
+        onError={(m) => setModeError(m)}
+      />
     </header>
+  );
+}
+
+/** Today's LLM usage against the daily budget — the "LLM 0/—" slot in the top bar. */
+export function LlmQuota() {
+  const llm = useApp((s) => s.status?.llm);
+  const used = llm?.calls_today ?? 0;
+  const budget = llm?.daily_budget;
+  const exhausted = Boolean(llm?.exhausted || llm?.paused);
+  const title = !llm?.enabled
+    ? (llm?.note ?? "LLM analyst is not running")
+    : `${llm.model}${llm.remaining !== undefined ? ` · ${llm.remaining} calls left today` : ""}${
+        llm.cached_hits ? ` · ${llm.cached_hits} answers from cache` : ""
+      }`;
+  return (
+    <span
+      className={`text-xs tabular-nums ${exhausted ? "text-warning" : "text-muted-foreground"}`}
+      title={title}
+      aria-label={`LLM calls today: ${used} of ${budget ?? "no budget"}`}
+      data-testid="llm-quota"
+    >
+      LLM {used}/{budget ?? "—"}
+    </span>
+  );
+}
+
+/** Auto places paper trades without asking, so switching to it needs an explicit confirmation. */
+export function AutoConfirm({
+  open,
+  bookId: id,
+  onClose,
+  onError,
+}: {
+  open: boolean;
+  bookId: string;
+  onClose: () => void;
+  onError: (message: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const confirm = async () => {
+    setBusy(true);
+    try {
+      await api.setMode(id, "auto", true);
+      onClose();
+    } catch (e) {
+      onError(e instanceof ApiError ? e.message : "Could not switch to Auto");
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogTitle>Switch to Auto mode?</DialogTitle>
+        <DialogDescription>
+          In Auto the agent places paper trades by itself, without asking you first. It still obeys every risk rule, the
+          daily loss limit and the kill switch — and it still only ever trades simulated money.
+        </DialogDescription>
+        <div className="mt-6 flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={confirm} disabled={busy}>
+            Yes, let the agent trade
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

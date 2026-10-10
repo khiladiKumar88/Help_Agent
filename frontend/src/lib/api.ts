@@ -2,8 +2,14 @@ import type {
   ActorPnl,
   Coverage,
   Dataset,
+  EdgeReport,
   JobBody,
   JobRow,
+  LLMCall,
+  LLMStatus,
+  SettingsView,
+  SignalCard,
+  SignalDetail,
   SignalRow,
   StrategyInfo,
   BookSummary,
@@ -55,7 +61,8 @@ const json = (method: string, data?: unknown): RequestInit => ({
 export const api = {
   status: () => request<SystemStatus>("/api/system/status"),
   book: (id: string) => request<BookSummary>(`/api/books/${id}`),
-  setMode: (id: string, mode: string) => request<{ mode: string }>(`/api/books/${id}/mode`, json("PUT", { mode })),
+  setMode: (id: string, mode: string, confirm = false) =>
+    request<{ mode: string }>(`/api/books/${id}/mode`, json("PUT", { mode, confirm })),
   trades: (id: string, status?: string) =>
     request<TradeView[]>(`/api/books/${id}/trades${status ? `?status=${status}` : ""}`),
   equity: (id: string) => request<EquityPoint[]>(`/api/books/${id}/equity`),
@@ -83,6 +90,21 @@ export const api = {
   bookConfig: (id: string) =>
     request<{ book: { instruments: string[]; timeframes: { signal: string; execution?: string } } }>(`/api/books/${id}/config`),
   signals: (bookId: string, limit = 30) => request<SignalRow[]>(`/api/books/${bookId}/signals?limit=${limit}`),
+  // Phase 3
+  cards: (bookId: string) => request<SignalCard[]>(`/api/books/${bookId}/cards`),
+  resolveCard: (signalId: string, approve: boolean) =>
+    request<{ card_status: string; trade_id?: string | null; shadow_trade_id?: string | null }>(
+      `/api/signals/${signalId}/card`,
+      json("POST", { approve }),
+    ),
+  journal: (bookId: string, filters: Record<string, string> = {}, limit = 100) =>
+    request<SignalRow[]>(`/api/books/${bookId}/journal?${new URLSearchParams({ ...filters, limit: String(limit) })}`),
+  signalDetail: (signalId: string) => request<SignalDetail>(`/api/signals/${signalId}`),
+  llmStatus: () => request<LLMStatus>("/api/llm/status"),
+  llmCalls: (bookId?: string, limit = 50) =>
+    request<LLMCall[]>(`/api/llm/calls?limit=${limit}${bookId ? `&book_id=${bookId}` : ""}`),
+  edge: (bookId: string) => request<EdgeReport>(`/api/books/${bookId}/edge`),
+  settings: () => request<SettingsView>("/api/settings"),
   strategies: () => request<StrategyInfo[]>("/api/strategies"),
   datasets: () => request<Dataset[]>("/api/history/datasets"),
   coverage: (exchange: string, symbol: string, timeframe: string) =>
