@@ -35,7 +35,11 @@ llm:
   provider: gemini                 # gemini | fake (deterministic, offline) | off (take every signal)
   model: gemini-3.8-flash          # current free-tier Flash model; any id the provider accepts
   api_key_env: GEMINI_API_KEY      # read from .env only — never logged, never put in a prompt
-  timeout_seconds: 30
+  # 60s, not 30: a live call measured ~9s, but a hard prompt can run much longer and this is
+  # a PER-ATTEMPT budget, so one slow reply no longer burns an attempt. Signals arrive on
+  # closed 15m candles, so latency is not the constraint. See `limits.max_retries` for the
+  # worst-case total, which the analyst holds the event bus for.
+  timeout_seconds: 60
   temperature: 0.2
   thinking_level: low              # minimal | low | medium | high
   max_output_tokens: 1024

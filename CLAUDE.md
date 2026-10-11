@@ -115,6 +115,15 @@ turns a TAKE into a pending card you approve or reject (it expires after
 `copilot.card_ttl_bars`); **Auto** places it itself. `force_execute` (backtests/replays) always
 executes. The analyst is called once per signal — never per tick.
 
+**`EventBus.publish` awaits its handlers in sequence**, so whatever the analyst spends inside
+the SIGNAL handler is time the tick path is not running — including `PaperBroker.on_tick`, which
+is what evaluates stops and targets. `llm.timeout_seconds` is a budget **per attempt**, so
+`limits.max_retries` multiplies it: at 60s and 3 retries the worst case is 4 x 60s plus up to
+14s of backoff, about 4.2 minutes. That is acceptable today because a stall only delays fill
+evaluation (the paper broker replays the ticks it then receives, it does not drop them), but it
+is the reason to keep `max_retries` small, and the thing to fix first if the analyst ever needs
+a longer budget: move the call off the bus rather than raising the timeout again.
+
 Replay/backtest = `Engine(cfg, clock=ReplayClock, provider=HistoricalReplayProvider,
 options=EngineOptions(drive_timers=False, force_execute=True, ...))`. Each stored bar becomes 4
 ticks (open, extremes, close — bullish bars assumed O→L→H→C, bearish O→H→L→C) then a candle

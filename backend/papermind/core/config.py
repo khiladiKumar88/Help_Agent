@@ -351,7 +351,7 @@ class LLMConfig(_Strict):
     # Any id the provider accepts works; this is the only place it is named.
     model: str = "gemini-3.8-flash"
     api_key_env: str = "GEMINI_API_KEY"  # read from .env only; never logged, never in a prompt
-    timeout_seconds: float = 30.0
+    timeout_seconds: float = 60.0  # PER ATTEMPT; max_retries multiplies it (see default.yaml)
     temperature: float = 0.2
     thinking_level: Literal["minimal", "low", "medium", "high"] = "low"
     max_output_tokens: int = 1024
