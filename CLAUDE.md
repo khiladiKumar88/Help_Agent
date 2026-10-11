@@ -38,6 +38,23 @@ trades simulated money only. It is built in phases; see "Status" below.
    (≤ 16 combos, enforced), report walk-forward results on out-of-sample windows only, always
    compare against the random baseline and buy-and-hold, and flag < `min_trades` (30) as not
    meaningful. Synthetic option prices are labelled APPROXIMATE.
+   - **Fills happen at the level you asked for, not at the bar's extreme.** A stop-market order
+     fills at its trigger plus the slippage model (`fills.stop_fill`); only a gap — a price
+     flagged `Tick.gap` that is already beyond the stop — fills worse. Filling off the raw tick
+     made every stop-out cost ~1.11R while targets still paid their full +rr*R: a one-sided bias
+     of about -0.1R per trade. Targets are resting limits and fill at their own price.
+   - **Independent windows are never reported as one account.** Each walk-forward fold runs from
+     a fresh copy of the capital, so `metrics.combine_metrics` sums counts and money, pools R and
+     win rate per trade, and reports drawdown/return % as the worst/average SINGLE window. Pooling
+     them against one capital produced drawdowns above 100%, which cannot exist.
+   - **The simulator's fairness is measured, not assumed.** `tests/backtest/test_fairness*.py`
+     put random entries on a driftless walk and assert expectancy ~0R with zero costs and
+     exactly -(cost in R) with costs on. They are the only tests allowed to switch costs off
+     (`run_engine(allow_zero_costs=True)`), and a test asserts every other path still refuses it.
+   - **Slippage is measured per instrument.** `SlippageConfig.per_instrument` entries carry
+     `observed_spread_bps`, `source` and `as_of`, like the fee files. Keep the assumption worse
+     than the observation; the book-wide fallback stays wide so an unmeasured instrument costs
+     MORE, never less.
 
 Also: never hardcode lot sizes, tick sizes, expiries or fee rates. They come from the
 instrument master (ccxt markets / Angel One scrip master) or `config/`. Fee files carry
@@ -66,8 +83,10 @@ backend/papermind/
   regime/      rule-based regime detector + time-of-day buckets
   scanner/     Scanner (closed candle -> strategies -> Signal), AgentExecutor (Decider ->
                sizing -> broker.submit), BaselineAgent (random entries, shadow account)
-  backtest/    HistoricalReplayProvider, runner (backtest / walk-forward / replay), metrics,
-               options (Black-Scholes synthetic pricing), jobs (background worker thread)
+  backtest/    HistoricalReplayProvider, runner (backtest / walk-forward / replay), metrics
+               (+ combine_metrics for multi-window runs), diagnostics (where the R went: R by
+               exit reason, winner vs loser, slippage and fees in R, stop overshoot, stop+target
+               in one bar), options (Black-Scholes synthetic pricing), jobs (worker thread)
   engine.py    wires everything; EngineOptions switch live vs replay (same class!)
   llm/         LLMProvider ABC; GeminiProvider (google-genai Interactions API); FakeProvider
                (deterministic, used by every test); RateLimiter (token bucket + daily budget)
@@ -217,9 +236,19 @@ make check            # the same
 - Phases 4–6: see README roadmap. The Phase-4 hooks are already in `analyst/context.py`
   (`LessonSource`, `EpisodeSource`) and return empty for now.
 
+- **Simulator honesty pass — done.** Fixed the stop-fill bias (stops filled at the bar's
+  extreme, costing ~0.1R per trade) and the walk-forward aggregate (independent windows pooled
+  against one capital, giving >100% drawdowns). Added `backtest/diagnostics.py`, the fairness
+  test suite, and per-instrument slippage calibrated against measured order-book spreads.
+
 ### Known gaps worth fixing before they mislead anyone
 
-- Walk-forward's aggregate `max_drawdown_pct` and `return_pct` are computed over the stitched
-  test windows, but each window's engine run restarts from the book's starting capital. The
-  curve can therefore read >100% drawdown (four independent 1,000-USDT accounts reported as
-  one). Per-fold numbers are fine; the aggregate percentages are not.
+- A **live** feed is assumed continuous between ticks: only the replay flags `Tick.gap`, so a
+  genuine jump on a live feed would fill a stop at its level rather than at the jump price.
+  Fine for a 1/sec feed on liquid perps; revisit for illiquid instruments or sparse feeds.
+- After the stop-fill fix, a finer base timeframe barely changes a backtest, because exits now
+  land on their own levels rather than on bar extremes. The remaining resolution-sensitivity is
+  the case where stop and target sit inside ONE bar and OHLC cannot say which came first;
+  `diagnostics.both_levels_in_one_bar_pct` reports how often that happened (0-1% for
+  `ema_pullback` on 15m BTC/ETH). Finer bars still matter for strategies whose levels sit closer
+  together.
