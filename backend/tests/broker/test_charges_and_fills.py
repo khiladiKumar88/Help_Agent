@@ -7,7 +7,7 @@ from decimal import Decimal
 import pytest
 
 from papermind.broker.charges import CryptoCharges, IndiaFnoCharges, make_charges
-from papermind.broker.fills import estimate_entry_fill, exit_trigger_price, market_fill, touch_price
+from papermind.broker.fills import estimate_entry_fill, exit_trigger_price, market_fill, stop_fill, touch_price
 from papermind.core.config import CryptoChargesConfig, IndiaFnoChargesConfig, Market, Segment, SlippageConfig
 from papermind.core.types import Instrument, InstrumentKind, Liquidity, Side, Tick
 from tests.conftest import BTC, T0, ccxt_instruments, crypto_charges, india_charges
@@ -168,6 +168,50 @@ class TestFills:
         assert q.price == D("66000")
         q = estimate_entry_fill(btc, Side.SELL, t, cfg, limit_price=D("64000"))
         assert q.price == D("64986.9")  # bid - 2 bps, floored to the tick
+
+    def test_a_stop_fills_at_its_own_level_not_at_the_bar_extreme(self) -> None:
+        """The price traded THROUGH the stop, so the order executes near the level.
+
+        Filling at the tick instead gave every stop-out an extra ~0.1R of loss while targets
+        filled exactly at their level — a one-sided bias of about -0.1R per trade.
+        """
+        btc = ccxt_instruments()[0]
+        # a long's stop at 64000; this tick is the bar's LOW, far below it
+        tick = Tick(instrument_id=BTC, ts=T0, ltp=D("63000"))
+        q = stop_fill(btc, Side.SELL, tick, D("64000"), SlippageConfig(bps=D("0"), est_spread_bps=D("0")))
+        assert q.reference_price == D("64000") and q.reference_kind == "stop_trigger"
+        assert q.price == D("64000"), "no slippage configured, so the fill is the stop itself"
+
+    def test_a_stop_still_pays_the_slippage_model(self) -> None:
+        btc = ccxt_instruments()[0]
+        tick = Tick(instrument_id=BTC, ts=T0, ltp=D("63000"))
+        q = stop_fill(btc, Side.SELL, tick, D("64000"), SlippageConfig(bps=D("2")))
+        assert q.price == D("63987.2")  # 64000 * 0.9998, floored to the 0.1 tick
+        assert q.slippage == D("12.8")
+
+    def test_a_buy_stop_fills_at_its_level_too(self) -> None:
+        btc = ccxt_instruments()[0]
+        tick = Tick(instrument_id=BTC, ts=T0, ltp=D("67000"))
+        q = stop_fill(btc, Side.BUY, tick, D("66000"), SlippageConfig(bps=D("0"), est_spread_bps=D("0")))
+        assert q.price == D("66000")
+
+    def test_a_gap_through_the_stop_fills_at_the_gap_price(self) -> None:
+        """The only honest reason to do worse than the stop: the market never offered it."""
+        btc = ccxt_instruments()[0]
+        tick = Tick(instrument_id=BTC, ts=T0, ltp=D("63000"), gap=True)
+        q = stop_fill(btc, Side.SELL, tick, D("64000"), SlippageConfig(bps=D("0"), est_spread_bps=D("0")))
+        assert q.price == D("63000")
+        assert q.reference_kind.startswith("gap_through_stop")
+
+    def test_a_gap_that_did_not_pass_the_stop_still_fills_at_the_stop(self) -> None:
+        btc = ccxt_instruments()[0]
+        # the bar opened ABOVE the stop, so it did not gap through; the stop level stands
+        tick = Tick(instrument_id=BTC, ts=T0, ltp=D("64500"), gap=True)
+        q = stop_fill(btc, Side.SELL, tick, D("64000"), SlippageConfig(bps=D("0"), est_spread_bps=D("0")))
+        assert q.reference_kind == "stop_trigger" and q.price == D("64000")
+
+    def test_live_ticks_are_continuous_by_default(self) -> None:
+        assert Tick(instrument_id=BTC, ts=T0, ltp=D("100")).gap is False
 
     @pytest.mark.parametrize(("side", "expected"), [(Side.SELL, D("99")), (Side.BUY, D("101"))])
     def test_exit_trigger_price(self, side: Side, expected: Decimal) -> None:

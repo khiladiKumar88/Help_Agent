@@ -22,7 +22,8 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field, model_validator
 
-from papermind.backtest.metrics import BuyHold, Metrics, cumulative_series, trade_metrics
+from papermind.backtest.diagnostics import run_diagnostics
+from papermind.backtest.metrics import BuyHold, Metrics, combine_metrics, cumulative_series, trade_metrics
 from papermind.backtest.replay import HistoricalReplayProvider
 from papermind.broker.charges import make_charges
 from papermind.core.clock import ReplayClock
@@ -117,6 +118,11 @@ class RunOutput:
     bars_in_window: int
     expected_bars: int
     params: dict[str, ParamValue] = field(default_factory=dict)
+    # trade id -> its fills, in time order. Needed to attribute slippage and stop overshoot;
+    # the engine's scratch database is disposed before the report is built, so they are copied out.
+    fills: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # base-timeframe candles, so diagnostics can ask what the fill granularity actually was
+    base_candles: list[Candle] = field(default_factory=list)
 
 
 def assert_costs_on(cfg: AppConfig, book: BookConfig) -> None:
@@ -156,11 +162,21 @@ async def run_engine(
     progress: Callable[[float], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
     llm_mode: LLMMode | None = None,
+    allow_zero_costs: bool = False,
 ) -> RunOutput:
+    """Run one engine over stored history.
+
+    `allow_zero_costs` exists for exactly one caller: the simulator-fairness tests, which need a
+    frictionless world to measure whether the machinery itself is biased (see
+    `tests/backtest/test_fairness.py`). Rule 7 — "backtests always pay the book's fees and
+    slippage" — still holds for every other path, and `tests/backtest/test_fairness.py` asserts
+    that a normal run still refuses zero costs.
+    """
     from papermind.engine import Engine, EngineOptions  # local import: engine imports the scanner
 
     book = cfg.book(rng.book_id)
-    assert_costs_on(cfg, book)
+    if not allow_zero_costs:
+        assert_costs_on(cfg, book)
     if rng.symbol not in book.instruments:
         raise BacktestError(f"{rng.symbol} is not in book {book.id}")
     signal_tf = book.timeframes["signal"]
@@ -239,6 +255,8 @@ async def run_engine(
         }
         signals = engine.journal.list_signals(book.id, limit=100_000)
         sig_candles = [c for c in engine.builder.closed(inst.id, signal_tf) if rng.start <= c.ts_open < rng.end]
+        fills = {t.id: engine.journal.fills_for_trade(t.id) for t in [*agent, *base]}
+        base_bars = [c for c in in_window if rng.start <= c.ts_open < rng.end]
     finally:
         await engine.stop()
         engine.db.engine.dispose()
@@ -253,6 +271,8 @@ async def run_engine(
         len(in_window),
         max(expected, len(in_window)),
         dict(strategies[0].params) if len(strategies) == 1 else {},
+        fills,
+        base_bars,
     )
 
 
@@ -318,6 +338,13 @@ def _money(v: Decimal, ccy: str) -> str:
     return f"{sign}{abs(v):,.2f} {ccy}"
 
 
+WINDOW_CONVENTION = (
+    "Each test window traded its own fresh copy of the starting capital, so trades, P&L and fees "
+    "are summed across windows, average R and win rate are per trade, and the drawdown and "
+    "return % describe the WORST and the AVERAGE single window — never a stitched account."
+)
+
+
 def plain_english(
     what: str,
     agent: Metrics,
@@ -358,6 +385,8 @@ def plain_english(
         )
     if approximate:
         text += " APPROXIMATE: option prices were synthesized (Black-Scholes), not real quotes."
+    if agent.windows > 1:
+        text += f" ({agent.windows} windows. {WINDOW_CONVENTION})"
     return text
 
 
@@ -396,10 +425,17 @@ def _report(
     ppy = 252.0 if book.market.value == "india" else 365.0
     agent_trades = [t for o in outs for t in o.agent_trades]
     base_trades = [t for o in outs for t in o.baseline_trades]
-    agent = trade_metrics(agent_trades, book.starting_capital, ppy)
-    base = trade_metrics(base_trades, book.starting_capital, ppy)
+    # Every window ran its own engine from a fresh copy of the capital, so metrics are computed
+    # PER WINDOW and then combined. Pooling them against one capital is what produced drawdowns
+    # above 100% in walk-forward reports.
+    cap = book.starting_capital
+    agent = combine_metrics([trade_metrics(o.agent_trades, cap, ppy) for o in outs], cap)
+    base = combine_metrics([trade_metrics(o.baseline_trades, cap, ppy) for o in outs], cap)
     inst = outs[0].instrument
     all_candles = [c for o in outs for c in o.candles]
+    all_fills = {tid: f for o in outs for tid, f in o.fills.items()}
+    # the "both levels in one bar" question is about the SIGNAL bars a human would look at
+    diag_candles = all_candles
     bh_parts = [buy_and_hold(cfg, book, inst, o.candles, s, e) for o, (s, e) in zip(outs, windows, strict=True)]
     bh_list = [b for b in bh_parts if b is not None]
     bh = None
@@ -413,7 +449,9 @@ def _report(
             bh_list[0].qty,
             sum((b.fees for b in bh_list), ZERO),
             net,
-            round(float(net / book.starting_capital) * 100, 3),
+            # same convention as the agent: the return of a typical window, not of a pretend
+            # single account that compounded across all of them
+            round(sum(b.return_pct for b in bh_list) / len(bh_list), 3),
             max(b.max_drawdown_pct for b in bh_list),
         )
     v = verdict(agent, base, bh, min_trades)
@@ -428,6 +466,12 @@ def _report(
             "data": {"bars": sum(o.bars_in_window for o in outs), "expected_bars": sum(o.expected_bars for o in outs)},
             "agent": agent.as_dict(),
             "baseline": base.as_dict(),
+            "diagnostics": {
+                "agent": run_diagnostics(agent_trades, all_fills, diag_candles).as_dict(),
+                "baseline": run_diagnostics(base_trades, all_fills, diag_candles).as_dict(),
+                "fill_timeframe": outs[0].base_candles[0].timeframe if outs[0].base_candles else None,
+                "signal_timeframe": outs[0].candles[0].timeframe if outs[0].candles else None,
+            },
             "buy_hold": bh.as_dict() if bh else None,
             "verdict": v,
             "summary": plain_english(label, agent, base, bh, v, ccy),

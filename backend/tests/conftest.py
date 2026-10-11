@@ -123,8 +123,16 @@ class Env:
         return self.cfg.book(BOOK_ID)
 
     async def tick(
-        self, ltp: str | Decimal, bid: str | None = None, ask: str | None = None, inst: str = BTC, advance: float = 1
+        self,
+        ltp: str | Decimal,
+        bid: str | None = None,
+        ask: str | None = None,
+        inst: str = BTC,
+        advance: float = 1,
+        gap: bool = False,
     ) -> Tick:
+        """Push one tick. `gap=True` marks a price that JUMPED from the previous one, which is
+        what lets a stop fill worse than its own level."""
         self.clock.advance(advance)
         t = Tick(
             instrument_id=inst,
@@ -133,6 +141,7 @@ class Env:
             bid=Decimal(bid) if bid else None,
             ask=Decimal(ask) if ask else None,
             source="test",
+            gap=gap,
         )
         self.market.update(t, self.clock.now())
         await self.broker.on_tick(t)

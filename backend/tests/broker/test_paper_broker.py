@@ -73,10 +73,14 @@ async def test_stop_loss_exit_net_pnl_and_r_multiple(env: Env) -> None:
     t = env.journal.get_trade(tid)
     assert t is not None and t.status is TradeStatus.CLOSED
     assert t.exit_reason is ExitReason.STOP_LOSS
-    assert t.avg_exit == D("63987.1")  # bid 63999.9 - 2 bps, floored to tick
-    assert t.gross_pnl == D("-5.12950000")
-    assert t.charges == D("0.32250025")  # 0.1625325 + 0.005*63987.1*0.05%
-    assert t.net_pnl == D("-5.45200025")
+    # A stop fills AT its level plus slippage, because the price traded through it:
+    # 64000 * (1 - 2bps) = 63987.2 exactly. It used to fill off the tick (the bid, 63999.9),
+    # which handed every stop-out an extra sliver of loss that targets never paid.
+    assert t.avg_exit == D("63987.2")
+    assert t.gross_pnl == D("-5.12900000")  # (63987.2 - 65013) * 0.005
+    assert t.charges == D("0.32250050")  # 0.1625325 entry + 0.005*63987.2*0.05% exit
+    assert t.net_pnl == D("-5.45150050")
+    # 1R = (65013 - 64000) * 0.005 = 5.065, so -5.4515 / 5.065 = -1.0763
     assert t.r_multiple == D("-1.08")
     assert env.journal.balance(BOOK_ID, Account.MAIN) == D("1000") + t.net_pnl
     assert not env.broker._orders_for(tid)  # target cancelled (OCO)
@@ -95,11 +99,29 @@ async def test_target_exit_is_maker_at_target(env: Env) -> None:
 
 
 async def test_gap_through_stop_fills_at_worse_price(env: Env) -> None:
+    """A price that JUMPED past the stop is the one case that fills worse than the level.
+
+    The market never offered 64000, so the fill is taken off the gap price instead.
+    """
     tid = await open_long(env)
-    await env.tick("63000", bid="63000", ask="63000.1")
+    await env.tick("63000", bid="63000", ask="63000.1", gap=True)
     t = env.journal.get_trade(tid)
-    assert t is not None and t.avg_exit == D("62987.4")  # 63000 - 2bps: slippage beyond the stop
+    assert t is not None and t.avg_exit == D("62987.4")  # 63000 - 2 bps, off the gap price
     assert t.r_multiple is not None and t.r_multiple < D("-2")
+
+
+async def test_a_continuous_move_past_the_stop_still_fills_at_the_stop(env: Env) -> None:
+    """The counterpart: without a gap the price is assumed to have traded through the level.
+
+    This is the assumption a live feed runs on — ticks arrive often enough that price is
+    effectively continuous between them. Only the replay, which knows where one bar ends and
+    the next begins, flags the discontinuity.
+    """
+    tid = await open_long(env)
+    await env.tick("63000", bid="63000", ask="63000.1")  # same prices, not flagged as a gap
+    t = env.journal.get_trade(tid)
+    assert t is not None and t.avg_exit == D("63987.2")  # the stop level, not the 63000 print
+    assert t.r_multiple is not None and D("-1.1") < t.r_multiple < D("-1")
 
 
 async def test_short_trade_round_trip(env: Env) -> None:
@@ -336,7 +358,8 @@ async def test_daily_loss_limit_halts_and_flattens_other_positions() -> None:
     d, eth = await env.broker.submit(env.req(inst=ETH, qty="0.1", sl="2950"))  # risk ~5.3
     assert d.approved and eth
     await env.tick("3000", bid="2999.9", ask="3000", inst=ETH)
-    await env.tick("2800", bid="2800", ask="2800.1", inst=ETH)  # gap: realized loss ~20
+    # a genuine gap through the 2950 stop, so it fills off 2800: realized loss ~20
+    await env.tick("2800", bid="2800", ask="2800.1", inst=ETH, gap=True)
     halted, reason = env.broker.halted(BOOK_ID)
     assert halted and reason and "daily loss limit" in reason
     exits = {o.purpose for o in env.broker._orders_for(btc)}

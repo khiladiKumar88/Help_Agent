@@ -33,6 +33,9 @@ class Metrics:
     best_trade: Decimal
     worst_trade: Decimal
     avg_hold_minutes: float | None
+    # Set when this row combines several independent windows (walk-forward). Percentages then
+    # describe ONE window, because every window traded its own fresh copy of the capital.
+    windows: int = 1
 
     def as_dict(self) -> dict[str, Any]:
         return {k: (format(v, "f") if isinstance(v, Decimal) else v) for k, v in asdict(self).items()}
@@ -103,6 +106,61 @@ def trade_metrics(trades: Sequence[Trade], capital: Decimal, periods_per_year: f
         best_trade=max(pnls) if pnls else ZERO,
         worst_trade=min(pnls) if pnls else ZERO,
         avg_hold_minutes=round(sum(holds) / len(holds), 1) if holds else None,
+    )
+
+
+def combine_metrics(parts: Sequence[Metrics], capital: Decimal) -> Metrics:
+    """Aggregate several INDEPENDENT windows (walk-forward folds) into one honest row.
+
+    Each fold's engine run starts from a fresh copy of the book's capital, so the folds are not
+    one compounding account. Pooling their trades and dividing by a single capital produced
+    nonsense — four 1,000-USDT accounts each losing 250 read as a 98% drawdown of one account.
+
+    The convention here, which `plain_english` states out loud:
+      * counts and money (trades, wins, P&L, fees, funding) are SUMS across windows;
+      * `avg_r`, `win_rate` and `profit_factor` are pooled over all trades, which is exactly the
+        per-trade average because every window risks the same fraction of the same capital;
+      * `max_drawdown` / `max_drawdown_pct` are the WORST SINGLE WINDOW, not the stitched curve,
+        so the percentage can never exceed 100;
+      * `return_pct` and `sharpe` are AVERAGED per window — the return you would have seen in a
+        typical window, not the sum of four separate accounts' returns.
+    """
+    if not parts:
+        return trade_metrics([], capital)
+    if len(parts) == 1:
+        return parts[0]
+    trades = sum(p.trades for p in parts)
+    wins = sum(p.wins for p in parts)
+    gp = sum((p.gross_profit for p in parts), ZERO)
+    gl = sum((p.gross_loss for p in parts), ZERO)
+    # weight by trade count so the pooled average equals the per-trade average
+    with_r = [p for p in parts if p.avg_r is not None and p.trades]
+    r_total = sum(p.avg_r * p.trades for p in with_r if p.avg_r is not None)
+    r_count = sum(p.trades for p in with_r)
+    sharpes = [p.sharpe for p in parts if p.sharpe is not None]
+    holds = [(p.avg_hold_minutes, p.trades) for p in parts if p.avg_hold_minutes is not None and p.trades]
+    hold_total = sum(h * n for h, n in holds)
+    hold_count = sum(n for _h, n in holds)
+    return Metrics(
+        trades=trades,
+        wins=wins,
+        losses=sum(p.losses for p in parts),
+        win_rate=round(wins / trades, 4) if trades else 0.0,
+        net_profit=sum((p.net_profit for p in parts), ZERO),
+        gross_profit=gp,
+        gross_loss=gl,
+        fees=sum((p.fees for p in parts), ZERO),
+        funding=sum((p.funding for p in parts), ZERO),
+        avg_r=round(r_total / r_count, 4) if r_count else None,
+        profit_factor=round(float(gp / -gl), 3) if gl < 0 else None,
+        max_drawdown=max(p.max_drawdown for p in parts),
+        max_drawdown_pct=max(p.max_drawdown_pct for p in parts),
+        return_pct=round(sum(p.return_pct for p in parts) / len(parts), 3),
+        sharpe=round(sum(sharpes) / len(sharpes), 3) if sharpes else None,
+        best_trade=max((p.best_trade for p in parts), default=ZERO),
+        worst_trade=min((p.worst_trade for p in parts), default=ZERO),
+        avg_hold_minutes=round(hold_total / hold_count, 1) if hold_count else None,
+        windows=len(parts),
     )
 
 

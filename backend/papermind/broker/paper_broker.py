@@ -18,9 +18,16 @@ from decimal import Decimal
 from typing import Any
 
 from papermind.broker.charges import ChargesModel, make_charges
-from papermind.broker.fills import FillQuote, estimate_entry_fill, exit_trigger_price, market_fill, touch_price
+from papermind.broker.fills import (
+    FillQuote,
+    estimate_entry_fill,
+    exit_trigger_price,
+    market_fill,
+    stop_fill,
+    touch_price,
+)
 from papermind.core.clock import Clock
-from papermind.core.config import AppConfig, BookConfig
+from papermind.core.config import AppConfig, BookConfig, SlippageConfig
 from papermind.core.events import EventBus, Topic
 from papermind.core.ids import new_id
 from papermind.core.money import PCT, ZERO, money, round_to_step
@@ -237,6 +244,12 @@ class PaperBroker:
         return self.journal.balance(book.id, account) - self.journal.pnl_since(book.id, account, self._day_start(book))
 
     # ================================================================== risk
+    def slippage_for(self, book_id: str, instrument_id: str) -> SlippageConfig:
+        """The book's slippage model, with any per-symbol override applied."""
+        cfg = self.book(book_id).slippage
+        inst = self.registry.get(instrument_id) if instrument_id in self.registry else None
+        return cfg.for_symbol(inst.symbol) if inst else cfg
+
     def build_context(self, req: OrderRequest) -> RiskContext:
         book = self.book(req.book_id)
         inst = self.registry.get(req.instrument_id) if req.instrument_id in self.registry else None
@@ -278,7 +291,7 @@ class PaperBroker:
         inst, tick = ctx.instrument, ctx.tick
         if inst is None or tick is None:
             return None
-        cfg = ctx.book.slippage
+        cfg = ctx.book.slippage.for_symbol(inst.symbol)
         limit = req.limit_price if req.order_type is OrderType.LIMIT else None
         q = estimate_entry_fill(inst, req.direction.entry_side, tick, cfg, limit)
         return jdict(
@@ -496,7 +509,7 @@ class PaperBroker:
             q = FillQuote(price=price, reference_price=price, reference_kind="settlement", slippage=ZERO)
             stale = False
         elif tick is not None:
-            q = market_fill(inst, o.side, tick, self.book(t.book_id).slippage)
+            q = market_fill(inst, o.side, tick, self.slippage_for(t.book_id, inst.id))
         else:
             px = t.avg_entry or t.current_sl
             q = FillQuote(price=px, reference_price=px, reference_kind="no_data_entry_price", slippage=ZERO)
@@ -596,17 +609,17 @@ class PaperBroker:
         if t is None:
             self._cancel_order(o, "orphan order")
             return False
-        book = self.book(o.book_id)
         inst = self.instrument(o.instrument_id)
         buy = o.side is Side.BUY
+        slip = self.slippage_for(o.book_id, inst.id)
         if o.type is OrderType.MARKET:
-            await self._fill(o, market_fill(inst, o.side, tick, book.slippage), Liquidity.TAKER, tick.ts)
+            await self._fill(o, market_fill(inst, o.side, tick, slip), Liquidity.TAKER, tick.ts)
         elif o.type is OrderType.LIMIT and o.limit_price is not None:
             if o.purpose is OrderPurpose.ENTRY:
-                touch, kind = touch_price(tick, o.side, book.slippage)
+                touch, kind = touch_price(tick, o.side, slip)
                 marketable = touch <= o.limit_price if buy else touch >= o.limit_price
                 if marketable and not o.evaluated:
-                    q = market_fill(inst, o.side, tick, book.slippage)
+                    q = market_fill(inst, o.side, tick, slip)
                     price = min(q.price, o.limit_price) if buy else max(q.price, o.limit_price)
                     await self._fill(
                         o,
@@ -624,7 +637,9 @@ class PaperBroker:
         elif o.type is OrderType.STOP_MARKET and o.trigger_price is not None:
             px = exit_trigger_price(tick, o.side)
             if (px >= o.trigger_price) if buy else (px <= o.trigger_price):
-                await self._fill(o, market_fill(inst, o.side, tick, book.slippage), Liquidity.TAKER, tick.ts)
+                # fills AT the stop level plus slippage, not at this tick's price — see stop_fill
+                q = stop_fill(inst, o.side, tick, o.trigger_price, slip)
+                await self._fill(o, q, Liquidity.TAKER, tick.ts)
         return o.status is OrderStatus.FILLED
 
     async def _fill(self, o: Order, q: FillQuote, liq: Liquidity, ts: datetime, stale: bool = False) -> None:

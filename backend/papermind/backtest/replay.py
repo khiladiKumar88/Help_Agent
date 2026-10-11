@@ -6,6 +6,8 @@ live); (2) at the candle's close time emits the closed candle (-> CandleBuilder 
 agent -> risk -> broker); (3) steps the engine timers. Market orders placed at a close fill on
 the NEXT bar's open tick — no lookahead. Tick path: a bullish bar is assumed to go
 open -> low -> high -> close, a bearish bar open -> high -> low -> close (conservative for stops).
+The opening tick is flagged as a gap, because nothing is known about the path from the previous
+close; the other three were reached continuously, so a stop they cross fills at its own level.
 There are no bid/ask quotes in OHLCV, so fills use LTP +/- half the book's estimated spread plus
 slippage, and full charges — fees and slippage can't be switched off.
 """
@@ -121,7 +123,9 @@ class HistoricalReplayProvider(MarketDataProvider):
                 if t > clock.now():
                     clock.set(t)
                 await self._funding_due(iid, t, px, fund_idx)
-                await hub.on_tick(Tick(instrument_id=iid, ts=clock.now(), ltp=px, source="replay"))
+                # the bar's opening price may have jumped from the previous close; the extremes
+                # and the close were reached continuously from it
+                await hub.on_tick(Tick(instrument_id=iid, ts=clock.now(), ltp=px, source="replay", gap=frac == 0.0))
             close_t = ts_open + timedelta(seconds=secs)
             if close_t > clock.now():
                 clock.set(close_t)

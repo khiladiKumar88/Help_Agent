@@ -160,6 +160,12 @@ class Tick(_Frozen):
     ask: Decimal | None = None
     volume: Decimal | None = None
     source: str = "unknown"
+    # True when this price may have JUMPED from the previously seen one, so the market never
+    # traded the prices in between. A live feed is effectively continuous, so the default is
+    # False; a replay sets it on each bar's opening tick, where the data says nothing about the
+    # path from the previous close. It matters for stop fills: a stop that the price traded
+    # THROUGH fills near its level, but a stop the market gapped past cannot.
+    gap: bool = False
 
     @field_validator("ltp")
     @classmethod

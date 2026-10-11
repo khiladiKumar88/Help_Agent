@@ -16,9 +16,32 @@ timeframes:
   signal: 15m
   execution: 1m
 slippage:
+  # Book-wide fallback. Kept wide on purpose: an unmeasured instrument should cost MORE, not
+  # less, until someone measures it. Per-instrument entries below carry the measurement.
   model: bps
   bps: 2                           # adverse slippage on top of bid/ask
-  est_spread_bps: 2                # used only when bid/ask are missing
+  est_spread_bps: 2                # used only when bid/ask are missing (always, in backtests)
+  per_instrument:
+    # Measured from 30 binanceusdm order-book snapshots on 2026-10-11. The top-of-book spread on
+    # these perps is a single tick and a 25,000 USDT clip does not clear level 1, so the real
+    # one-side cost is a tiny fraction of a bp. The assumption below is still ~35-70x the
+    # measured half-spread, which is the allowance for fast moves, latency and stop-market
+    # execution — deliberately pessimistic, but no longer absurd. The old 3 bps per side was
+    # ~250x the observed cost for BTC and swamped the strategy's own edge.
+    BTC/USDT:USDT:
+      bps: 0.4
+      est_spread_bps: 0.02         # ~1.7x the observed full spread
+      observed_spread_bps: 0.012   # full top-of-book spread, median of 30 snapshots
+      source: binanceusdm order book (fetch_order_book, public)
+      as_of: 2026-10-11
+      notes: 25k USDT buy filled 0.006 bps from mid; no depth impact at our size.
+    ETH/USDT:USDT:
+      bps: 0.4
+      est_spread_bps: 0.06         # ~1.5x the observed full spread
+      observed_spread_bps: 0.040
+      source: binanceusdm order book (fetch_order_book, public)
+      as_of: 2026-10-11
+      notes: 25k USDT buy filled 0.020 bps from mid; no depth impact at our size.
 risk:
   max_risk_per_trade_pct: 1        # % of equity, incl. estimated round-trip fees
   max_leverage: 3

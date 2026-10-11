@@ -28,14 +28,38 @@ def touch_price(tick: Tick, side: Side, cfg: SlippageConfig) -> tuple[Decimal, s
     return (tick.ltp + half if side is Side.BUY else tick.ltp - half), "ltp_half_spread"
 
 
-def market_fill(inst: Instrument, side: Side, tick: Tick, cfg: SlippageConfig) -> FillQuote:
-    ref, kind = touch_price(tick, side, cfg)
+def fill_from(inst: Instrument, side: Side, ref: Decimal, kind: str, cfg: SlippageConfig) -> FillQuote:
+    """Apply the book's slippage model to a given reference price, rounding adverse to the trader."""
     sign = 1 if side is Side.BUY else -1
     raw = ref * (1 + sign * cfg.bps / BPS) if cfg.model == "bps" else ref + sign * cfg.extra_ticks * inst.tick_size
     price = round_to_step(raw, inst.tick_size, "up" if side is Side.BUY else "down")
     if price <= ZERO:
         price = inst.tick_size
     return FillQuote(price=price, reference_price=ref, reference_kind=kind, slippage=abs(price - ref))
+
+
+def market_fill(inst: Instrument, side: Side, tick: Tick, cfg: SlippageConfig) -> FillQuote:
+    ref, kind = touch_price(tick, side, cfg)
+    return fill_from(inst, side, ref, kind, cfg)
+
+
+def stop_fill(inst: Instrument, side: Side, tick: Tick, trigger: Decimal, cfg: SlippageConfig) -> FillQuote:
+    """Fill a triggered stop-market order honestly.
+
+    A stop is an instruction to leave at a level. When the market trades THROUGH that level the
+    order executes near it, plus the usual slippage — you do not receive the single worst print
+    of the bar. Filling at the bar's extreme instead (which is what using the raw tick does in a
+    replay) made every stop-out cost about 1.1R rather than 1R, while targets filled exactly at
+    their level: a systematic, one-sided bias worth roughly -0.1R per trade.
+
+    The one case that genuinely fills worse is a gap: if the first price seen in this bar is
+    already beyond the stop, the market never offered the level and the gap price is the truth.
+    """
+    touch, kind = touch_price(tick, side, cfg)
+    gapped_past = (touch > trigger) if side is Side.BUY else (touch < trigger)
+    if tick.gap and gapped_past:
+        return fill_from(inst, side, touch, f"gap_through_stop:{kind}", cfg)
+    return fill_from(inst, side, trigger, "stop_trigger", cfg)
 
 
 def estimate_entry_fill(

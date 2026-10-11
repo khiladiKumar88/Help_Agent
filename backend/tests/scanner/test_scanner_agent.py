@@ -256,7 +256,8 @@ async def test_baseline_daily_loss_halt_does_not_halt_main_book() -> None:
     )
     assert tid is not None
     await env.tick("65000", bid="64999.9", ask="65000")
-    await env.tick("63000", bid="63000", ask="63000.1")  # gap through the stop: baseline loses > 12
+    # a genuine gap through the stop, so it fills off 63000: the baseline loses > 12
+    await env.tick("63000", bid="63000", ask="63000.1", gap=True)
     assert env.broker.halted(BOOK_ID, Account.SHADOW_BASELINE)[0]
     assert env.broker.halted(BOOK_ID, Account.MAIN) == (False, None)
     assert env.journal.get_state("shadow_halts")

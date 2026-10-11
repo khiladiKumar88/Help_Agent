@@ -131,11 +131,53 @@ class RiskConfig(_Strict):
         return v
 
 
+class InstrumentSlippage(_Strict):
+    """Slippage for one symbol, with the measurement it was calibrated against.
+
+    Like the fee files, this carries its provenance: `observed_spread_bps`, `source` and `as_of`
+    record what the book actually looked like when the numbers were set, so nobody has to guess
+    later whether an assumption is current. Keep the assumption a little WORSE than the
+    observation — calm top-of-book is not what a stop-market order meets in a fast move.
+    """
+
+    bps: Decimal | None = None
+    est_spread_bps: Decimal | None = None
+    extra_ticks: int | None = None
+    observed_spread_bps: Decimal | None = None  # full top-of-book spread, as measured
+    source: str = ""
+    as_of: date | None = None
+    notes: str = ""
+
+
 class SlippageConfig(_Strict):
     model: Literal["bps", "spread"] = "bps"
     bps: Decimal = Decimal("2")  # extra adverse slippage on top of the touch price
     est_spread_bps: Decimal = Decimal("2")  # used when bid/ask are unavailable
     extra_ticks: int = 0  # spread model: extra adverse ticks
+    # Per-symbol overrides, keyed by exchange symbol (e.g. "BTC/USDT:USDT"). A missing field
+    # falls back to the book-wide value above, so an entry can tune one number only.
+    per_instrument: dict[str, InstrumentSlippage] = Field(default_factory=dict)
+
+    def for_symbol(self, symbol: str) -> SlippageConfig:
+        """The effective config for one symbol. Returns self when nothing is overridden."""
+        o = self.per_instrument.get(symbol)
+        if o is None:
+            return self
+        return SlippageConfig(
+            model=self.model,
+            bps=self.bps if o.bps is None else o.bps,
+            est_spread_bps=self.est_spread_bps if o.est_spread_bps is None else o.est_spread_bps,
+            extra_ticks=self.extra_ticks if o.extra_ticks is None else o.extra_ticks,
+        )
+
+    def per_side_bps(self, symbol: str | None = None) -> Decimal:
+        """Total adverse bps a market order pays on ONE side, for the bps model.
+
+        Half the estimated spread to reach the touch price, plus the slippage term. This is the
+        number to compare against a measured half-spread.
+        """
+        eff = self.for_symbol(symbol) if symbol else self
+        return eff.est_spread_bps / 2 + eff.bps
 
 
 class StrategySpec(_Strict):
