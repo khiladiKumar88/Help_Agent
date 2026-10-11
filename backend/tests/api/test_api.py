@@ -244,3 +244,33 @@ def test_engine_not_running_returns_503(tmp_path: Path) -> None:
     c = TestClient(app)  # no context manager -> lifespan not run
     assert c.get("/api/books").status_code == 503
     assert c.get("/api/health").json()["engine"] is False
+
+
+def test_live_engine_sets_its_own_warmup_boundary(client: TestClient) -> None:
+    """A live engine refuses signals from candles that closed before it came up.
+
+    Backtests pass `trading_starts_at` explicitly; live runs have to set it themselves, or
+    seeded/back-filled history fires the strategies at startup.
+    """
+    e = engine_of(client)
+    assert e.scanner.trading_starts_at is not None
+    assert e.scanner.trading_starts_at <= e.clock.now()
+    assert e.status()["scanner"]["warmup_skipped"] == 0
+
+
+async def test_replay_engine_keeps_an_unset_boundary() -> None:
+    """A replay drives its own clock from the past, so the live guard must not apply to it."""
+    from papermind.core.clock import ReplayClock
+    from papermind.engine import EngineOptions
+
+    cfg = make_cfg(db_url="sqlite://", llm={"provider": "off"})
+    e = Engine(
+        cfg,
+        Settings(_env_file=None),  # type: ignore[call-arg]
+        clock=ReplayClock(datetime(2026, 1, 5, tzinfo=UTC)),
+        provider_factory=FixtureProvider,
+        options=EngineOptions(drive_timers=False, build_llm=False),
+    )
+    await e.start()
+    assert e.scanner.trading_starts_at is None
+    await e.stop()

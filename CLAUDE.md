@@ -38,6 +38,17 @@ trades simulated money only. It is built in phases; see "Status" below.
 6. **No lookahead.** Everything reads time from the injected `Clock`. Use `ReplayClock` for
    replays and tests. Strategies/backtests only ever see **closed** candles (`CandleBuilder`
    emits closed bars only; `ohlcv_to_candles` drops the forming bar).
+   - **Warm-up never trades.** A signal may only come from a candle that CLOSED while we were
+     live. `Scanner.trading_starts_at` is that boundary: backtests pass their warm-up end, and
+     `Engine.start()` sets it to `clock.now()` for any non-replay run. Independently,
+     `CcxtProvider` *seeds* (`hub.seed_history`) every 1m bar that had already closed before
+     `_live_from` instead of publishing it, so a cold start, a reconnect or a feed catching up
+     on a backlog warms the indicators silently. Both guards exist because either alone would
+     have let this through: a backlog of ~500 1m bars was published as live candles 100 at a
+     time, firing a burst of signals for bars hours old, each one stamped with the wall clock.
+   - **A signal's `ts` is its candle's close**, never `clock.now()`. Strategies firing on one bar
+     then share a timestamp that is a real candle boundary, which is what makes the signal list
+     readable and says which bar fired. `scanner.warmup_skipped` counts what the boundary dropped.
 
 7. **Honest backtests.** Backtests/replays read only the local `HistoryStore` (never an exchange
    API), always pay the book's fees + slippage (zero costs are refused), use small parameter grids
@@ -229,10 +240,20 @@ make check            # the same
 - UI: dark by default; never show a price without the stale check (`isPriceStale`); wrap
   widgets in `ErrorBoundary`. Chart colours: categorical slots from the validated palette
   (see `components/Charts.tsx`).
-- Chart maths lives in `lib/` as pure functions (`lib/priceRange.ts`), not inside the
-  `lightweight-charts` effects, so it is testable directly. `test/setup.ts` shims `matchMedia`,
+- Chart maths lives in `lib/` as pure functions (`lib/priceRange.ts`, `lib/chartBars.ts`), not
+  inside the `lightweight-charts` effects, so it is testable directly.
+  - **`lightweight-charts` is strict about time.** It wants whole UTC *seconds* (never a Date,
+    a string or a fractional number) and `series.update()` THROWS on a bar older than the last
+    one it holds. So: an instrument/timeframe change always resets the series with `setData`,
+    a view epoch (`loaded`) drops ticks that arrive before the new history is in, and `tickBar`
+    returns null for a tick belonging to a bar we have already left. Switching 5m -> 15m while
+    ticks arrived used to floor a tick into an older bucket and crash the chart with
+    "Cannot update oldest data" — `test/priceChart.test.tsx` holds that case. `test/setup.ts` shims `matchMedia`,
   `ResizeObserver` and a no-op 2D canvas context, which is what lets chart components mount in
   jsdom at all (`test/priceChart.test.tsx`); assert against the DOM they render, never pixels.
+- The Live signal list shows what the analyst did with each signal: `lib/signalVerdict.ts` turns
+  a row into "LLM TAKE/SKIP + confidence" or "not sent to LLM: <reason>", plus why a TAKE made no
+  card. A signal with no card must be explainable without opening the Journal.
 - The order preview shows the assumed slippage from the same code path the fill uses
   (`broker/fills.estimate_entry_fill`), so the preview can never quote a model the broker
   does not apply.

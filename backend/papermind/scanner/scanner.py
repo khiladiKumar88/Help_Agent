@@ -2,8 +2,16 @@
 
 Candle close -> FeatureFrame (closed candles only) -> regime -> strategies -> Signal
 (persisted + published on Topic.SIGNAL). A strategy that raises is logged and skipped
-(fail safe); it never stops the scanner. Signals before `trading_starts_at` are suppressed
-(backtest warm-up). The scanner never places orders.
+(fail safe); it never stops the scanner. The scanner never places orders.
+
+`trading_starts_at` is the warm-up boundary: a candle that CLOSED at or before it produces no
+signal, no LLM call and no card. Backtests set it to the end of their warm-up window; the live
+engine sets it to the moment the feed came up, so a cold start, a reconnect or a provider
+catching up on a backlog cannot emit a burst of signals for bars that closed hours ago.
+
+A signal's `ts` is the CLOSE of the candle that produced it, not the wall clock. Several
+strategies firing on the same bar therefore share one timestamp that is a real candle boundary,
+which is what makes the signal list readable.
 """
 
 from __future__ import annotations
@@ -70,6 +78,7 @@ class Scanner:
         self._last_signal: dict[tuple[str, str, str], datetime] = {}
         self.errors = 0
         self.signals_emitted = 0
+        self.warmup_skipped = 0  # candles that closed before trading_starts_at (never scanned)
         bus.subscribe(Topic.CANDLE, self.on_candle)
 
     def _books_for(self, candle: Candle) -> list[BookConfig]:
@@ -106,6 +115,12 @@ class Scanner:
         tf_s = tf_seconds(candle.timeframe)
         bar_close = candle.ts_open + timedelta(seconds=tf_s)
         if self.trading_starts_at is not None and bar_close <= self.trading_starts_at:
+            # warm-up: this bar closed before we were live, so it is history, not a trading signal
+            self.warmup_skipped += 1
+            log.debug(
+                "warm-up candle skipped",
+                extra={"book": book.id, "instrument_id": candle.instrument_id, "bar_close": bar_close.isoformat()},
+            )
             return
         inst = self.registry.get(candle.instrument_id)
         tz = book.session.timezone if book.session else book.trading_day_tz
@@ -139,7 +154,7 @@ class Scanner:
                 snapshot = {**frame.snapshot(), "funding_rate": float(funding) if funding is not None else None}
             sig = Signal(
                 id=new_id("sig"),
-                ts=self.clock.now(),
+                ts=bar_close,  # the candle close that produced it — never the wall clock
                 book_id=book.id,
                 instrument_id=inst.id,
                 strategy_id=strat.id,

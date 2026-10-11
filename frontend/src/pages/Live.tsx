@@ -83,7 +83,7 @@ export function Live() {
           <ErrorBoundary name="Signal cards">
             <SignalCardFeed bookId={id} mode={mode} />
           </ErrorBoundary>
-          <SignalsCard bookId={id} mode={mode} />
+          <SignalsCard bookId={id} mode={mode} llm={llm} />
         </div>
       </div>
     </div>

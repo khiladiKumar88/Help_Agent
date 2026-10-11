@@ -420,3 +420,39 @@ async def test_ccxt_provider_seeds_signal_timeframes() -> None:
         assert len(hub.builder.closed(BTC, "1m")) > 0
     finally:
         await p.stop()
+
+
+async def test_catchup_candles_are_seeded_not_published() -> None:
+    """A backlog of 1m bars that closed BEFORE the feed came up must not publish CANDLE events.
+
+    Publishing them runs the strategies, so a cold start would emit a burst of signals for bars
+    that closed hours ago — all stamped with the current wall clock. They still have to reach the
+    aggregator, or the indicators would start cold.
+    """
+    from papermind.data.public_only import PublicOnlyExchange
+
+    clock = ReplayClock(datetime(2026, 1, 5, 10, 30, 30, tzinfo=UTC))
+    p, hub, fake = make_provider(clock)
+    published: list[Candle] = []
+    hub.bus.subscribe(Topic.CANDLE, published.append)
+    p._ex = PublicOnlyExchange(fake)
+    p._live_from = clock.now()
+    insts = p.registry.load_ccxt_markets(p.exchange, fake.markets, 4, p.cfg.symbols, clock.now())
+    p._instruments = {i.symbol: i for i in insts}
+    # the feed is 40 minutes behind — a cold start, a reconnect, or a failed 1m seed
+    p._last_1m[BTC] = datetime(2026, 1, 5, 9, 50, tzinfo=UTC)
+
+    await p.poll_candles_once()
+
+    assert published == []  # every bar closed at or before 10:30:30
+    closed = hub.builder.closed(BTC, "1m")
+    assert closed[-1].ts_open == datetime(2026, 1, 5, 10, 29, tzinfo=UTC)  # aggregator is warm
+    assert hub.builder.closed(BTC, "5m")  # and the higher timeframes aggregated too
+
+    # a bar that closes while we are live IS news
+    clock.advance(minutes=2)
+    await p.poll_candles_once()
+    assert [c.ts_open for c in published if c.timeframe == "1m"] == [
+        datetime(2026, 1, 5, 10, 30, tzinfo=UTC),
+        datetime(2026, 1, 5, 10, 31, tzinfo=UTC),
+    ]

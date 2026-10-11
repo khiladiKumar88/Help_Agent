@@ -2,7 +2,9 @@
 
 Live quotes: websocket (ccxt.pro watch_*) with automatic fallback to REST polling.
 Candles: authoritative closed 1m candles are polled over REST (they carry real volume);
-ticks only drive the forming candle for the UI.
+ticks only drive the forming candle for the UI. A candle that had already closed before this
+provider came up is WARM-UP: it is seeded into the aggregator silently, never published as a
+live candle, so it cannot make the scanner fire (see `_live_from`).
 Funding: polled; a FundingEvent is emitted when the clock passes the funding timestamp.
 """
 
@@ -83,6 +85,8 @@ class CcxtProvider(MarketDataProvider):
         self._quotes: dict[str, dict[str, Any]] = {}
         self._last_1m: dict[str, datetime] = {}
         self._last_funding_emitted: dict[str, datetime] = {}
+        # Set in start(): candles that closed at or before this instant are history, not news.
+        self._live_from: datetime | None = None
         self.feed_mode: str = cfg.feed
         self.errors: int = 0
         self.last_error: str | None = None
@@ -99,6 +103,7 @@ class CcxtProvider(MarketDataProvider):
         return [i.id for i in self._instruments.values()]
 
     async def start(self) -> None:
+        self._live_from = self.clock.now()
         self._ex = PublicOnlyExchange(self._factory(self.exchange))
         markets = await self.ex.load_markets()
         insts = self.registry.load_ccxt_markets(
@@ -268,15 +273,37 @@ class CcxtProvider(MarketDataProvider):
                 backoff = min(backoff * 2, 60.0)
 
     # ------------------------------------------------------------------ candles
+    def _is_warmup(self, candle: Candle) -> bool:
+        """True when this bar had already closed before the provider came up.
+
+        Such a bar is history. It must warm the aggregator but never be published: a published
+        candle makes the scanner run its strategies, and a backlog of them (a cold start, a
+        reconnect, a feed that fell behind) would emit a burst of signals for bars that closed
+        hours ago, all stamped with the current wall clock.
+        """
+        if self._live_from is None:
+            return True
+        return candle.ts_open + timedelta(seconds=60) <= self._live_from
+
     async def poll_candles_once(self) -> None:
         for inst in self._instruments.values():
             last = self._last_1m.get(inst.id)
             since = last + timedelta(minutes=1) if last else None
             candles = await self.fetch_candles(inst.id, "1m", since=since, limit=100)
-            for c in candles:
-                if last is None or c.ts_open > last:
-                    await self.hub.on_1m_candle(c)
-                    last = c.ts_open
+            fresh = [c for c in candles if last is None or c.ts_open > last]
+            warmup = [c for c in fresh if self._is_warmup(c)]
+            if warmup:
+                # seeded, not published: aggregation and persistence happen, the scanner stays quiet
+                self.hub.seed_history(warmup)
+                log.info(
+                    "seeded %d warm-up 1m candles (closed before the feed came up)",
+                    len(warmup),
+                    extra={"instrument_id": inst.id, "warmup_candles": len(warmup)},
+                )
+            for c in fresh[len(warmup) :]:
+                await self.hub.on_1m_candle(c)
+            if fresh:
+                last = fresh[-1].ts_open
             if last is not None:
                 self._last_1m[inst.id] = last
 

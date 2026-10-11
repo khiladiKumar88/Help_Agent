@@ -78,6 +78,21 @@ class Rig:
         )
         await self.hub.on_base_candle(c)
 
+    async def bar_at_stale_clock(self, i: int, close: str = "65000") -> None:
+        """Close bar `i` without moving the clock to its close — a feed that fell behind."""
+        ts = T0 + timedelta(minutes=15 * i)
+        c = Candle(
+            instrument_id=BTC,
+            timeframe="15m",
+            ts_open=ts,
+            open=D(close),
+            high=D(close) + 50,
+            low=D(close) - 50,
+            close=D(close),
+            volume=D(1),
+        )
+        await self.hub.on_base_candle(c)
+
 
 def make_rig(
     cfg: AppConfig | None = None,
@@ -281,3 +296,35 @@ def test_build_strategies_from_book_config() -> None:
     india = {**book_dict(), "market": "india", "id": "india-futures-intraday", "strategies": [{"id": "funding_fade"}]}
     with pytest.raises(ValueError, match="does not support"):
         build_strategies(make_cfg(india).book("india-futures-intraday"))
+
+
+async def test_signal_ts_is_the_candle_close_not_the_wall_clock() -> None:
+    """A signal is stamped with the close of the bar that made it.
+
+    Stamping `clock.now()` made a catch-up burst look like several signals at one arbitrary
+    second (none of them a candle boundary), which is unreadable and hides which bar fired.
+    """
+    rig = make_rig(fire_on={1})
+    for i in range(3):
+        await rig.bar(i)
+    rig.env.clock.advance(minutes=37)  # the feed is behind: wall clock far past the bar close
+    for i in range(3, 8):
+        await rig.bar_at_stale_clock(i)
+    assert rig.signals
+    for s in rig.signals:
+        assert s.ts.minute % 15 == 0 and s.ts.second == 0 and s.ts.microsecond == 0
+        assert s.ts != rig.env.clock.now()
+
+
+async def test_candles_that_closed_before_going_live_make_no_signal_or_card() -> None:
+    """The live warm-up boundary: a backlog replayed at startup must stay silent end to end."""
+    live_from = T0 + timedelta(minutes=15 * 6)
+    rig = make_rig(fire_on=set(range(20)), starts=live_from)
+    for i in range(6):  # all of these close at or before live_from
+        await rig.bar(i)
+    assert rig.signals == [] and rig.decisions == []
+    assert rig.env.journal.list_signals(BOOK_ID) == []
+    assert rig.scanner.warmup_skipped > 0
+    for i in range(6, 9):  # now bars close while we are live
+        await rig.bar(i)
+    assert len(rig.signals) == 1 and rig.signals[0].ts > live_from

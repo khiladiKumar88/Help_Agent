@@ -16,15 +16,21 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Segmented } from "@/components/ui/segmented";
 import { api } from "@/lib/api";
+import {
+  type Bar,
+  barExtent,
+  bucketTime,
+  candleToBar,
+  sortedBars,
+  type Tf,
+  TF_SECONDS,
+  tickBar,
+} from "@/lib/chartBars";
 import { cssColor } from "@/lib/cssColor";
 import { fitPriceRange, type FittedRange, type PriceLevel, positionLevels } from "@/lib/priceRange";
-import type { Candle, TradeView } from "@/lib/types";
+import type { TradeView } from "@/lib/types";
 import { fmtPrice, shortSymbol } from "@/lib/utils";
 import { isPriceStale, useApp } from "@/store/app";
-
-type Tf = "1m" | "5m" | "15m" | "1h";
-const TF_SECONDS: Record<Tf, number> = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600 };
-
 
 const LEVEL_COLOR: Record<PriceLevel["kind"], () => string> = {
   entry: () => cssColor("--muted-foreground"),
@@ -32,23 +38,21 @@ const LEVEL_COLOR: Record<PriceLevel["kind"], () => string> = {
   target: () => cssColor("--profit"),
 };
 
-const barExtent = (bars: { high: number; low: number }[]) =>
-  bars.length ? { min: Math.min(...bars.map((b) => b.low)), max: Math.max(...bars.map((b) => b.high)) } : null;
+/** The series only ever holds one (instrument, timeframe); this names it. */
+const viewKey = (instrumentId: string, tf: Tf) => `${instrumentId}|${tf}`;
 
-const toBar = (c: Candle) => ({
-  time: (new Date(c.ts_open).getTime() / 1000) as UTCTimestamp,
-  open: Number(c.open),
-  high: Number(c.high),
-  low: Number(c.low),
-  close: Number(c.close),
-});
+/** lightweight-charts brands its time type; our bars already carry plain UTC seconds. */
+const asChartBar = (b: Bar) => ({ ...b, time: b.time as UTCTimestamp });
 
 export function PriceChart({ instrumentId, symbol, positions }: { instrumentId: string; symbol: string; positions: TradeView[] }) {
   const el = useRef<HTMLDivElement>(null);
   const chart = useRef<IChartApi | null>(null);
   const series = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const lines = useRef<IPriceLine[]>([]);
-  const lastBar = useRef<ReturnType<typeof toBar> | null>(null);
+  const lastBar = useRef<Bar | null>(null);
+  // The view the series currently holds data for. Ticks are applied only when it matches the
+  // selected one, so a tick in flight across a timeframe switch can never reach the old series.
+  const loaded = useRef<string | null>(null);
   const fitRef = useRef<FittedRange | null>(null);
   const [barRange, setBarRange] = useState<{ min: number; max: number } | null>(null);
   const [tf, setTf] = useState<Tf>("1m");
@@ -90,19 +94,24 @@ export function PriceChart({ instrumentId, symbol, positions }: { instrumentId: 
     };
   }, []);
 
-  // load history
+  // load history — a new instrument or timeframe always RESETS the series with setData(), never
+  // update(): the old bars are on a different grid, so appending to them is meaningless and
+  // lightweight-charts rejects any bar older than the newest one it already holds.
   useEffect(() => {
+    const key = viewKey(instrumentId, tf);
     let cancelled = false;
     lastBar.current = null;
+    loaded.current = null; // ticks are ignored until this view's history is in
     setBarRange(null);
     api
       .candles(instrumentId, tf, 300)
       .then((r) => {
-        if (cancelled || !series.current) return;
-        const bars = r.closed.map(toBar);
-        if (tf === "1m" && r.forming) bars.push(toBar(r.forming));
-        series.current.setData(bars);
+        if (cancelled || !series.current) return; // a later switch already superseded this load
+        // the API's `forming` bar is always a base-timeframe (1m) candle, so it only belongs here at 1m
+        const bars = sortedBars([...r.closed.map(candleToBar), tf === "1m" ? candleToBar(r.forming) : null]);
+        series.current.setData(bars.map(asChartBar));
         lastBar.current = bars.at(-1) ?? null;
+        loaded.current = key;
         setBarRange(barExtent(bars));
         chart.current?.timeScale().scrollToRealTime();
       })
@@ -115,22 +124,16 @@ export function PriceChart({ instrumentId, symbol, positions }: { instrumentId: 
   // live updates from ticks (forming bar)
   useEffect(() => {
     if (!entry || !series.current) return;
-    const px = Number(entry.tick.ltp);
-    const secs = TF_SECONDS[tf];
-    const t = (Math.floor(new Date(entry.tick.ts).getTime() / 1000 / secs) * secs) as UTCTimestamp;
-    const prev = lastBar.current;
-    if (prev && t < prev.time) return;
-    const bar =
-      prev && prev.time === t
-        ? { ...prev, high: Math.max(prev.high, px), low: Math.min(prev.low, px), close: px }
-        : { time: t, open: prev?.close ?? px, high: px, low: px, close: px };
-    series.current.update(bar);
+    if (loaded.current !== viewKey(instrumentId, tf)) return; // history for this view is not in yet
+    const bar = tickBar(lastBar.current, bucketTime(entry.tick.ts, TF_SECONDS[tf]), Number(entry.tick.ltp));
+    if (!bar) return; // unusable tick, or one belonging to a bar we have already left
+    series.current.update(asChartBar(bar));
     lastBar.current = bar;
     // keep the same object when nothing moved, so this does not re-render on every tick
     setBarRange((r) =>
       r && bar.low >= r.min && bar.high <= r.max ? r : { min: Math.min(r?.min ?? bar.low, bar.low), max: Math.max(r?.max ?? bar.high, bar.high) },
     );
-  }, [entry, tf]);
+  }, [entry, instrumentId, tf]);
 
   // levels of the open positions on this instrument, and the price range that covers them
   const levels = useMemo(

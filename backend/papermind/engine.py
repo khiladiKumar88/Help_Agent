@@ -152,6 +152,12 @@ class Engine:
             log.exception("market data provider failed to start")
             self.journal.audit("DATA", f"provider failed to start: {exc}", level="ERROR")
         self.watchdog.watch(self.provider.instrument_ids())
+        if self.options.trading_starts_at is None and not self.clock.is_replay:
+            # Live: only a candle that CLOSES from here on is a trading signal. Everything the
+            # provider seeded or back-filled to warm the indicators is history — it must not
+            # produce signals, LLM calls or Co-pilot cards. (The provider seeds rather than
+            # publishes its backlog; this is the second, independent guard.)
+            self.scanner.trading_starts_at = self.clock.now()
         if self.options.drive_timers:
             self._timer = asyncio.create_task(self._timer_loop(), name="engine-timer")
         self.started = True
@@ -228,5 +234,12 @@ class Engine:
             "books": {b: {"status": self.agent_status(b), "mode": self.broker.mode(b)} for b in self.cfg.books},
             "llm": self.llm_status(),
             "secrets": self.settings.secrets_status(),
-            "scanner": {"signals": self.scanner.signals_emitted, "errors": self.scanner.errors},
+            "scanner": {
+                "signals": self.scanner.signals_emitted,
+                "errors": self.scanner.errors,
+                "warmup_skipped": self.scanner.warmup_skipped,
+                "trading_starts_at": (
+                    self.scanner.trading_starts_at.isoformat() if self.scanner.trading_starts_at else None
+                ),
+            },
         }

@@ -2,12 +2,19 @@ import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { api } from "@/lib/api";
-import type { SignalRow } from "@/lib/types";
+import { cardNote, signalVerdict } from "@/lib/signalVerdict";
+import type { LLMStatus, SignalRow } from "@/lib/types";
 import { fmtPrice, fmtTime } from "@/lib/utils";
 import { useApp } from "@/store/app";
 
-/** Latest scanner signals for the book. In Manual mode the agent only shows analysis — you decide. */
-export function SignalsCard({ bookId, mode }: { bookId: string; mode: string }) {
+/**
+ * Latest scanner signals for the book, each with what the analyst decided.
+ *
+ * The verdict line is the point: a signal with no card is otherwise unexplainable from this
+ * page. It says either the LLM's TAKE/SKIP and confidence, or that the LLM was never asked and
+ * why — so "signals but no cards waiting" always has a visible cause.
+ */
+export function SignalsCard({ bookId, mode, llm }: { bookId: string; mode: string; llm?: LLMStatus | null }) {
   const version = useApp((s) => s.signalVersion);
   const conn = useApp((s) => s.conn);
   const [rows, setRows] = useState<SignalRow[]>([]);
@@ -30,19 +37,34 @@ export function SignalsCard({ bookId, mode }: { bookId: string; mode: string }) 
         {rows.length === 0 ? (
           <p className="py-3 text-center text-sm text-muted-foreground">No signals yet — strategies run on each closed candle.</p>
         ) : (
-          <ul className="max-h-64 space-y-2 overflow-y-auto text-sm" data-testid="signals">
+          <ul className="max-h-80 space-y-2 overflow-y-auto text-sm" data-testid="signals">
             {rows.map((s) => {
               const regime = typeof s.regime === "object" && s.regime ? String(s.regime.label ?? "") : String(s.regime ?? "");
+              const v = signalVerdict(s, llm ?? null);
+              const note = cardNote(s, mode);
               return (
                 <li key={s.id} className="border-b pb-2 last:border-0">
                   <div className="flex items-center gap-2">
                     <Badge variant={s.direction === "long" ? "profit" : "loss"}>{s.direction.toUpperCase()}</Badge>
                     <span className="font-medium">{s.strategy_id}</span>
-                    <span className="ml-auto text-xs text-muted-foreground">{fmtTime(s.ts)}</span>
+                    <span className="ml-auto text-xs text-muted-foreground" title={`candle close ${s.ts}`}>
+                      {fmtTime(s.ts)}
+                    </span>
                   </div>
                   <div className="mt-0.5 text-xs text-muted-foreground tabular-nums">
                     entry ~{fmtPrice(s.entry_ref)} · SL {fmtPrice(s.stop_loss)} · TP {fmtPrice(s.target)} · {regime.replace("_", " ")}
                   </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5" data-testid={`verdict-${s.id}`}>
+                    <Badge variant={v.tone}>{v.label}</Badge>
+                    {v.confidence !== null && <Badge variant="outline">confidence {v.confidence}</Badge>}
+                    {note && <span className="text-xs text-muted-foreground">{note}</span>}
+                  </div>
+                  {v.detail && (
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {v.sentToLlm ? "" : `${v.label}: `}
+                      {v.detail}
+                    </p>
+                  )}
                   <div className="mt-0.5 text-xs">{s.setup}</div>
                 </li>
               );
