@@ -257,7 +257,7 @@ def test_job_manager_success_error_cancel_and_restart(tmp_path: Path) -> None:
     # it and reads could observe a half-applied row. Production always runs on a file database,
     # where each thread gets its own pooled connection.
     db = Database(f"sqlite:///{tmp_path / 'jobs.db'}")
-    db.create_all()
+    db.init_schema()  # a file database is Alembic's; create_all refuses to touch one
     jobs = JobManager(db)
 
     async def ok(progress: Any, cancelled: Any) -> dict[str, Any]:

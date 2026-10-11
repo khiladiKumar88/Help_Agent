@@ -186,8 +186,18 @@ make check            # the same
 ```
 - Migrations: change models → `cd backend && uv run alembic revision --autogenerate -m "..."`,
   review the file, then `tests/db/test_migrations.py` must pass (head == models).
+- **Only Alembic creates tables in a file database.** `Database.create_all()` raises on one;
+  `init_schema()` (= migrate to head) is the only way in. Migrations also run with DDL inside a
+  real transaction (`migrate._migration_engine`), because pysqlite never opens one for DDL by
+  itself — without that, a boot interrupted mid-migration (a `uvicorn --reload` restart, a
+  Ctrl+C) leaves its new tables behind while `alembic_version` stays put, and every later boot
+  dies on `table ... already exists` with the database stuck between two revisions. That is how
+  the 0002 → 0003 upgrade broke once. `tests/db/test_migrations.py` holds all three invariants.
 - Tests are deterministic: `ReplayClock`, in-memory SQLite, fixtures in
-  `backend/tests/fixtures/`. **No test may hit a live API.** The LLM is always `FakeProvider`
+  `backend/tests/fixtures/`. **No test may hit a live API, and none may open a real database
+  file** — `conftest._no_real_database` fails any test that opens a SQLite file outside
+  pytest's tmp dir, which is what stops a forgotten `db_url` from quietly migrating
+  `backend/papermind.db` (the default URL is CWD-relative). The LLM is always `FakeProvider`
   or a stubbed SDK client. The single live smoke test (`tests/llm/test_live_gemini.py`) carries
   the `live` marker, which `addopts = -m 'not live'` excludes — run it deliberately with
   `PAPERMIND_LIVE_LLM=1 uv run pytest -m live`.

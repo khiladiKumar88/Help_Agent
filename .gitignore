@@ -23,6 +23,8 @@ frontend/dist/
 *.db-wal
 *.db-shm
 backups/
+db_backups/
+*.bak
 
 .DS_Store
 history.db

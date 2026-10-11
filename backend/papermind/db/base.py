@@ -89,6 +89,19 @@ class Database:
         self._factory = sessionmaker(self.engine, expire_on_commit=False)
 
     def create_all(self) -> None:
+        """Create every table straight from the models. IN-MEMORY DATABASES ONLY.
+
+        A file database belongs to Alembic — `init_schema` migrates it. Creating tables behind
+        Alembic's back leaves tables it has no record of, and the next migration that creates
+        one of them dies with "table ... already exists" with no way forward. Phase 3 lost a
+        database to exactly that shape of problem, so the rule is enforced here rather than
+        written down: there is no code path to a file database except a migration.
+        """
+        if not self.in_memory:
+            raise RuntimeError(
+                f"create_all() refused on the file database {self.engine.url!r}: only Alembic may "
+                "create tables there. Use init_schema(), which migrates to head."
+            )
         from papermind.db import models  # noqa: F401  (register tables)
 
         Base.metadata.create_all(self.engine)

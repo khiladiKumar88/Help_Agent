@@ -1,9 +1,11 @@
 """Shared fixtures. Every test is deterministic: ReplayClock + in-memory SQLite + fixtures.
-No test touches a live API."""
+No test touches a live API, and no test touches a real database file."""
 
 from __future__ import annotations
 
 import json
+import sqlite3
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -11,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import event
+from sqlalchemy.engine import Engine as SAEngine
 
 from papermind.broker.paper_broker import PaperBroker
 from papermind.core.clock import ReplayClock
@@ -21,6 +25,51 @@ from papermind.data.market import MarketState
 from papermind.db.base import Database
 from papermind.instruments.registry import InstrumentRegistry, instrument_from_ccxt_market
 from papermind.journal.service import Journal
+
+# --------------------------------------------------------------------------- safety net
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_real_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Fail loudly if any test opens a SQLite file outside pytest's tmp directory.
+
+    `db_url` defaults to the RELATIVE `sqlite:///papermind.db`, so a test that forgets to pass
+    a tmp path does not fail — it quietly opens the developer's real database, resolved against
+    the current working directory, and migrates or writes to it. This listens on the SQLAlchemy
+    `Engine` class itself rather than on our own `make_engine`, so it also catches engines built
+    by modules that imported `make_engine` by value (`HistoryStore`) and any engine a future
+    phase builds for itself. The path comes from `PRAGMA database_list`, i.e. the path SQLite
+    actually opened, which is what makes a CWD-relative URL impossible to miss.
+    """
+    allowed = Path(tmp_path_factory.getbasetemp()).resolve()
+
+    # insert=True so this runs before make_engine's own PRAGMA listener: a blocked connection
+    # must not even switch the file's journal mode on its way to failing.
+    @event.listens_for(SAEngine, "connect", insert=True)
+    def _check(dbapi_conn: object, _record: object) -> None:
+        if not isinstance(dbapi_conn, sqlite3.Connection):
+            return
+        cur = dbapi_conn.cursor()
+        try:
+            files = [row[2] for row in cur.execute("PRAGMA database_list").fetchall()]
+        finally:
+            cur.close()
+        for f in files:
+            if not f:
+                continue  # in-memory
+            path = Path(f).resolve()
+            if allowed not in path.parents:
+                raise RuntimeError(
+                    f"test opened the database file {path} outside pytest's tmp dir ({allowed}). "
+                    "Tests must never touch a real database — use the `tmp_path` fixture, or "
+                    "'sqlite://' for an in-memory one."
+                )
+
+    try:
+        yield
+    finally:
+        event.remove(SAEngine, "connect", _check)
+
 
 FIXTURES = Path(__file__).parent / "fixtures"
 T0 = datetime(2026, 1, 5, 10, 0, 0, tzinfo=UTC)
