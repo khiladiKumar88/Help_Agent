@@ -17,8 +17,9 @@ import os
 
 import pytest
 
+from papermind.analyst.factory import resolve_api_key
 from papermind.analyst.schema import AnalystVerdict, response_schema
-from papermind.core.config import load_config
+from papermind.core.config import Settings, load_config
 from papermind.llm.base import LLMRequest
 from papermind.llm.gemini import GeminiProvider
 
@@ -32,10 +33,13 @@ pytestmark = [
 
 @pytest.mark.asyncio
 async def test_the_configured_model_answers_with_valid_json() -> None:
-    cfg = load_config().llm
-    if not os.environ.get(cfg.api_key_env):
-        pytest.skip(f"{cfg.api_key_env} is not set")
-    provider = GeminiProvider(cfg)
+    app_cfg = load_config()
+    cfg = app_cfg.llm
+    # resolved the same way the engine does it, so .env counts and not just the environment
+    key = resolve_api_key(app_cfg, Settings())
+    if not key:
+        pytest.skip(f"no API key: set {cfg.api_key_env} in .env or the environment")
+    provider = GeminiProvider(cfg, api_key=key)
     schema = response_schema()
     req = LLMRequest(
         system=(

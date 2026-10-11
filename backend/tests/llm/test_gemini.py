@@ -12,7 +12,8 @@ from typing import Any
 import pytest
 from google.genai import errors as genai_errors
 
-from papermind.core.config import LLMConfig
+from papermind.analyst.factory import build_provider, resolve_api_key
+from papermind.core.config import AppConfig, LLMConfig, Settings
 from papermind.llm.base import (
     LLMError,
     LLMInvalidOutput,
@@ -32,6 +33,11 @@ def cfg(**over: Any) -> LLMConfig:
     }
     base.update(over)
     return LLMConfig.model_validate(base)
+
+
+def app_cfg(**over: Any) -> AppConfig:
+    """A minimal AppConfig whose `llm` block is the one under test."""
+    return AppConfig.model_validate({"llm": {**cfg(**over).model_dump(mode="json")}})
 
 
 def request(timeout: float = 5.0) -> LLMRequest:
@@ -216,3 +222,62 @@ class TestErrorMapping:
         with pytest.raises(LLMError):
             await provider(stub, conf).complete(request())
         assert len(stub.calls) == 4
+
+
+class TestKeyResolution:
+    """Where the API key comes from.
+
+    Regression: the key was only read from os.environ, but the README tells you to put it in
+    `.env` — which pydantic-settings loads into `Settings` and deliberately does NOT export into
+    the environment. The Gemini analyst could therefore never start from a documented setup.
+    """
+
+    def test_a_key_in_the_env_file_is_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        settings = Settings(gemini_api_key="from-dot-env", _env_file=None)  # type: ignore[call-arg]
+        assert resolve_api_key(app_cfg(), settings) == "from-dot-env"
+
+    def test_a_plain_environment_variable_still_works(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("GEMINI_API_KEY", "from-environ")
+        assert resolve_api_key(app_cfg(), Settings(_env_file=None)) == "from-environ"  # type: ignore[call-arg]
+
+    def test_the_env_file_wins_over_the_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`.env` is the documented home for secrets, so it is the first place we look."""
+        monkeypatch.setenv("GEMINI_API_KEY", "from-environ")
+        settings = Settings(gemini_api_key="from-dot-env", _env_file=None)  # type: ignore[call-arg]
+        assert resolve_api_key(app_cfg(), settings) == "from-dot-env"
+
+    def test_a_custom_env_var_name_falls_back_to_the_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """There is no Settings field for an arbitrary name, so the environment is the only source."""
+        monkeypatch.setenv("MY_OWN_KEY", "custom")
+        cfg = app_cfg(api_key_env="MY_OWN_KEY")
+        assert resolve_api_key(cfg, Settings(_env_file=None)) == "custom"  # type: ignore[call-arg]
+
+    def test_no_key_anywhere_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        assert resolve_api_key(app_cfg(), Settings(_env_file=None)) is None  # type: ignore[call-arg]
+
+    def test_a_blank_key_counts_as_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        settings = Settings(gemini_api_key="   ", _env_file=None)  # type: ignore[call-arg]
+        assert resolve_api_key(app_cfg(), settings) is None
+
+    def test_build_provider_hands_the_key_over_without_touching_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The end-to-end regression: a .env-only key must produce a working provider."""
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        settings = Settings(gemini_api_key="from-dot-env", _env_file=None)  # type: ignore[call-arg]
+        provider = build_provider(app_cfg(), settings)
+        assert provider is not None and provider.name == "gemini"
+
+    def test_without_a_key_the_analyst_is_unavailable_and_says_why(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        with pytest.raises(LLMNotConfigured, match="GEMINI_API_KEY"):
+            build_provider(app_cfg(), Settings(_env_file=None))  # type: ignore[call-arg]
+
+    def test_settings_secret_never_returns_a_blank_string(self) -> None:
+        s = Settings(gemini_api_key=" ", angel_api_key="real", _env_file=None)  # type: ignore[call-arg]
+        assert s.secret("gemini_api_key") is None
+        assert s.secret("angel_api_key") == "real"
+        assert s.secret("not_a_field") is None

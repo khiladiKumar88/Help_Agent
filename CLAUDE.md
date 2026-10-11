@@ -27,8 +27,14 @@ trades simulated money only. It is built in phases; see "Status" below.
    response, latency, tokens, failure reason). Lessons get logged once Phase 4 lands.
 5. **Secrets only in `.env`** (`.env.example` is committed). Logging passes through
    `core/logging.RedactingFilter`; the API exposes secret *presence* only. Nothing secret ever
-   goes into a prompt (test-enforced), and the API key is read from the environment by the
-   provider alone.
+   goes into a prompt (test-enforced).
+   - **Read secrets through `Settings.secret(name)`, never `os.environ` directly.**
+     pydantic-settings loads `.env` into `Settings` and does NOT export it into the process
+     environment, so `os.environ` cannot see a key the user put where the docs say to put it.
+     This bit once: `GeminiProvider` read `os.environ`, so the analyst refused to start from a
+     documented `.env` setup while every test passed (the fakes never needed a key).
+     `analyst.factory.resolve_api_key` is the one place that resolves it: `.env` first, then the
+     environment, which is what makes a custom `llm.api_key_env` name work.
 6. **No lookahead.** Everything reads time from the injected `Clock`. Use `ReplayClock` for
    replays and tests. Strategies/backtests only ever see **closed** candles (`CandleBuilder`
    emits closed bars only; `ohlcv_to_candles` drops the forming bar).

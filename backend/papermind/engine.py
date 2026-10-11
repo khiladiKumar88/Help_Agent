@@ -113,7 +113,14 @@ class Engine:
         decider = opts.decider
         if decider is None and opts.build_llm:
             try:
-                self.analyst = build_analyst(cfg, self.clock, self.journal, self.registry, provider=opts.llm_provider)
+                self.analyst = build_analyst(
+                    cfg,
+                    self.clock,
+                    self.journal,
+                    self.registry,
+                    provider=opts.llm_provider,
+                    settings=self.settings,  # so a key in .env is actually found
+                )
             except AnalystUnavailable as exc:
                 # No silent fallback: without an analyst the agent stays out of Auto and the UI
                 # says why. Trading every signal instead would be exactly the wrong default.

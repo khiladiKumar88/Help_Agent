@@ -12,11 +12,12 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from papermind.analyst.analyst import LLMAnalyst
 from papermind.analyst.context import EpisodeSource, LessonSource
 from papermind.core.clock import Clock, RealClock
-from papermind.core.config import AppConfig
+from papermind.core.config import AppConfig, Settings
 from papermind.instruments.registry import InstrumentRegistry
 from papermind.journal.service import Journal
 from papermind.llm.base import LLMNotConfigured, LLMProvider
@@ -30,7 +31,23 @@ class AnalystUnavailable(Exception):
     """The configured analyst could not be built. Carries a human-readable reason for the UI."""
 
 
-def build_provider(cfg: AppConfig) -> LLMProvider | None:
+def resolve_api_key(cfg: AppConfig, settings: Settings | None) -> str | None:
+    """The provider's API key, from `.env` first and then a plain environment variable.
+
+    `.env` is read by pydantic-settings into `Settings` and is NOT exported into os.environ, so
+    looking only at the environment misses a key put exactly where the README says to put it.
+    The environment fallback is what makes a custom `llm.api_key_env` name work.
+    """
+    if settings is not None:
+        # the standard field name mirrors the standard env var: GEMINI_API_KEY -> gemini_api_key
+        from_env_file = settings.secret(cfg.llm.api_key_env.lower())
+        if from_env_file:
+            return from_env_file
+    value = os.environ.get(cfg.llm.api_key_env, "").strip()
+    return value or None
+
+
+def build_provider(cfg: AppConfig, settings: Settings | None = None) -> LLMProvider | None:
     """Return the configured provider, or None when `llm.provider` is `off`."""
     kind = cfg.llm.provider
     if kind == "off":
@@ -39,7 +56,7 @@ def build_provider(cfg: AppConfig) -> LLMProvider | None:
         return FakeProvider()
     from papermind.llm.gemini import GeminiProvider  # imported lazily: only needed for real runs
 
-    return GeminiProvider(cfg.llm)
+    return GeminiProvider(cfg.llm, api_key=resolve_api_key(cfg, settings))
 
 
 def build_analyst(
@@ -50,6 +67,7 @@ def build_analyst(
     provider: LLMProvider | None = None,
     lessons: LessonSource | None = None,
     episodes: EpisodeSource | None = None,
+    settings: Settings | None = None,
 ) -> LLMAnalyst | None:
     """Build the analyst, or return None when no LLM is configured.
 
@@ -60,7 +78,7 @@ def build_analyst(
         if cfg.llm.provider == "off":
             return None
         try:
-            provider = build_provider(cfg)
+            provider = build_provider(cfg, settings)
         except LLMNotConfigured as exc:
             raise AnalystUnavailable(str(exc)) from exc
         except Exception as exc:  # pragma: no cover - unexpected SDK/import failure

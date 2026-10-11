@@ -86,6 +86,19 @@ class Settings(BaseSettings):
         """Presence only — values are never exposed."""
         return {n: bool(getattr(self, n) and getattr(self, n).get_secret_value()) for n in self.secret_names()}
 
+    def secret(self, name: str) -> str | None:
+        """Read one secret's value, or None when it is unset/blank.
+
+        This is the ONLY way components should reach a secret. `.env` is loaded by
+        pydantic-settings into this object and is deliberately NOT exported into os.environ, so
+        anything reading os.environ directly cannot see a key the user put where the docs say.
+        """
+        field = getattr(self, name, None)
+        if field is None:
+            return None
+        value = field.get_secret_value()
+        return value.strip() or None
+
 
 # --------------------------------------------------------------------------- book config
 

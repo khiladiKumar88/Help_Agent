@@ -50,7 +50,9 @@ class FixtureProvider(MarketDataProvider):
 
 @pytest.fixture
 def client(tmp_path: Path) -> Iterator[TestClient]:
-    cfg = make_cfg(db_url=f"sqlite:///{tmp_path / 'api.db'}")
+    # llm off: this file tests the Phase-1 manual-trading surface, which must not depend on
+    # whether an analyst happens to be available
+    cfg = make_cfg(db_url=f"sqlite:///{tmp_path / 'api.db'}", llm={"provider": "off"})
     settings = Settings(gemini_api_key="sk-should-never-leak", _env_file=None)  # type: ignore[call-arg]
     app = create_app(lambda: Engine(cfg, settings, provider_factory=FixtureProvider))
     with TestClient(app) as c:
@@ -183,7 +185,13 @@ def test_pending_cancel(client: TestClient) -> None:
 
 
 def test_modes(client: TestClient) -> None:
-    assert client.put(f"/api/books/{BOOK_ID}/mode", json={"mode": "copilot"}).status_code == 409
+    """With the LLM off there is no analyst, so the agent modes are refused rather than faked.
+
+    Mode switching WITH an analyst (including the Auto confirmation) is covered in
+    tests/api/test_api_agent.py.
+    """
+    r = client.put(f"/api/books/{BOOK_ID}/mode", json={"mode": "copilot"})
+    assert r.status_code == 409 and "analyst" in r.json()["detail"]["message"]
     assert client.put(f"/api/books/{BOOK_ID}/mode", json={"mode": "manual"}).json()["mode"] == "manual"
 
 
