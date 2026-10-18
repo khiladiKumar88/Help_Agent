@@ -31,7 +31,7 @@ from papermind.db.base import Database
 from papermind.instruments.registry import InstrumentRegistry
 from papermind.journal.service import Journal
 from papermind.risk.manager import RiskManager
-from papermind.risk.session import in_entry_window
+from papermind.risk.session import day_start, in_entry_window
 from papermind.scanner.agent import AgentExecutor, BaselineAgent, Decider
 from papermind.scanner.scanner import FundingFn, Scanner
 from papermind.strategies.base import Strategy
@@ -55,6 +55,8 @@ class EngineOptions:
     trading_starts_at: datetime | None = None  # no signals before this (backtest warm-up)
     base_tf: str = "1m"
     persist_candles: bool = True
+    # live only: decide off the publish path, so one slow LLM call cannot delay another signal
+    concurrent_decisions: bool = True
     funding_fn: FundingFn | None = None
     strategies: dict[str, list[Strategy]] | None = None
     decider: Decider | None = None
@@ -136,6 +138,9 @@ class Engine:
             opts.force_execute,
             clock=self.clock,
             shadow_raw=self.analyst is not None,
+            # A live decision must not hold up the next signal; a replayed one must stay in
+            # order, or the same backtest stops giving the same answer.
+            concurrent_decisions=opts.concurrent_decisions and not self.clock.is_replay,
         )
         self.baseline = BaselineAgent(self.bus, self.broker, self.journal, self.clock)
 
@@ -169,6 +174,8 @@ class Engine:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._timer
         await self.provider.stop()
+        # a decision in flight still has a trade to place and a row to write
+        await self.executor.drain_decisions()
         self.started = False
 
     async def run_timers_once(self) -> None:
@@ -217,11 +224,22 @@ class Engine:
                 "calls_today": 0,
                 "daily_budget": None,
                 "enabled": False,
+                "today": self.llm_today(),
                 "note": self.llm_error
                 or ("LLM is switched off (llm.provider: off) — the rules agent takes every signal"),
             }
         st = self.analyst.status()
-        return {**st, "calls_today": st["calls"], "enabled": True, "note": None}
+        return {**st, "calls_today": st["calls"], "enabled": True, "today": self.llm_today(), "note": None}
+
+    def llm_today(self) -> dict[str, Any]:
+        """Today's call log, summarised: how many, how slow, how many timed out.
+
+        Read from `llm_calls` rather than the limiter's counter: the counter is reserved up front
+        and knows nothing about latency, and the whole point of this panel is to make a bad day
+        visible without opening the call log. The day boundary is UTC, matching the daily budget
+        this sits next to — the two numbers have to be counting the same day.
+        """
+        return self.journal.llm_usage_today(day_start(self.clock.now(), "UTC"))
 
     def status(self) -> dict[str, Any]:
         return {

@@ -358,11 +358,27 @@ export interface LLMCall {
   error_reason: string | null;
   error: string | null;
   latency_ms: number;
+  queue_wait_ms: number;
   input_tokens: number | null;
   output_tokens: number | null;
   thought_tokens: number | null;
   total_tokens: number | null;
   cached: boolean;
+}
+
+/** Today's call log, summarised. `null` latency means nothing reached the provider yet. */
+export interface LLMToday {
+  calls: number;
+  ok: number;
+  errors: number;
+  timeouts: number;
+  rate_limited: number;
+  cached: number;
+  avg_latency_ms: number | null;
+  max_latency_ms: number | null;
+  avg_queue_wait_ms: number | null;
+  input_tokens: number;
+  output_tokens: number;
 }
 
 export interface LLMStatus {
@@ -384,6 +400,9 @@ export interface LLMStatus {
   confidence_threshold?: number;
   prompt_version?: string;
   exhausted?: boolean;
+  parked_until?: string | null;
+  parked_reason?: string | null;
+  today?: LLMToday;
 }
 
 export interface SignalDetail {

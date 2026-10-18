@@ -329,8 +329,8 @@ class LLMRateLimits(_Strict):
     requests_per_minute: int = 10  # token-bucket refill rate
     burst: int | None = None  # bucket capacity; defaults to requests_per_minute
     tokens_per_minute: int | None = 250_000  # None = don't track input tokens per minute
-    requests_per_day: int = 200  # hard daily call budget; the agent PAUSES when it is used up
-    max_retries: int = 3  # retries on 429 / 5xx (exponential backoff)
+    requests_per_day: int = 20  # hard daily call budget; the agent PAUSES when it is used up
+    max_retries: int = 2  # retries on 5xx/transport (exponential backoff); see gemini.py for 429
     backoff_base_seconds: float = 2.0
     backoff_max_seconds: float = 32.0
 
@@ -351,7 +351,7 @@ class LLMConfig(_Strict):
     # Any id the provider accepts works; this is the only place it is named.
     model: str = "gemini-3.8-flash"
     api_key_env: str = "GEMINI_API_KEY"  # read from .env only; never logged, never in a prompt
-    timeout_seconds: float = 60.0  # PER ATTEMPT; max_retries multiplies it (see default.yaml)
+    timeout_seconds: float = 45.0  # PER ATTEMPT, provider call only; never the rate-limit wait
     temperature: float = 0.2
     thinking_level: Literal["minimal", "low", "medium", "high"] = "low"
     max_output_tokens: int = 1024

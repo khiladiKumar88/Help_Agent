@@ -43,6 +43,15 @@ export function pnlClass(v: string | number | null | undefined): string {
   return n > 0 ? "text-profit" : "text-loss";
 }
 
+/** Latency the way you'd say it out loud: "840ms", "8.6s", "1m 2s". */
+export function fmtLatency(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return "—";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const s = Math.round(ms / 1000);
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
 export function fmtTime(iso: string | null | undefined): string {
   if (!iso) return "—";
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });

@@ -35,12 +35,15 @@ llm:
   provider: gemini                 # gemini | fake (deterministic, offline) | off (take every signal)
   model: gemini-3.8-flash          # current free-tier Flash model; any id the provider accepts
   api_key_env: GEMINI_API_KEY      # read from .env only — never logged, never put in a prompt
-  # 60s, not 30: a live call measured ~9s, but a hard prompt can run much longer and this is
-  # a PER-ATTEMPT budget, so one slow reply no longer burns an attempt. Signals arrive on
-  # closed 15m candles, so latency is not the constraint. See `limits.max_retries` for the
-  # worst-case total, which the analyst holds the event bus for.
-  timeout_seconds: 60
+  # PER ATTEMPT, and it bounds the provider call only — never the wait for a rate-limit slot.
+  # Measured on this model: a healthy answer is 6-9s, with a tail to the mid-40s. 45s covers the
+  # tail; past that, retrying beats waiting. The provider also gets this as a real socket read
+  # timeout, so a stalled connection fails here instead of hanging until the OS gives up.
+  timeout_seconds: 45
   temperature: 0.2
+  # `minimal` is REJECTED by gemini-3.8-flash (400: "Thinking level THINKING_LEVEL_MINIMAL is not
+  # supported for this model"), so `low` is the floor here, not a choice. It reports 0 thought
+  # tokens and is the cheapest setting the model accepts.
   thinking_level: low              # minimal | low | medium | high
   max_output_tokens: 1024
   confidence_threshold: 70         # below this the answer is treated as SKIP
@@ -49,10 +52,17 @@ llm:
   log_prompts: true                # store the full prompt with each call record
   limits:
     # Google does NOT publish the free-tier numbers any more — your own limits are shown in
-    # Google AI Studio. These defaults are deliberately conservative: set them to YOUR key's.
+    # Google AI Studio. Set them to YOUR key's: a budget set higher than the real one does not
+    # buy extra calls, it just means the agent finds out the hard way, one stalled signal at a
+    # time. `requests_per_day: 200` against a real cap of 20 cost a whole day of false timeouts.
+    #
+    # 20/day is what this key's 429 actually says for gemini-3.8-flash on the free tier:
+    #   "Rate limit exceeded for model gemini-3.8-flash (limit: 20 requests per day on Free Tier)"
+    # That is ~20 judged signals a DAY, so on a 15m chart the analyst cannot look at everything.
+    # Either raise the tier, or keep the scanner's signal count low enough to matter.
     requests_per_minute: 10
     tokens_per_minute: 250000      # null to stop tracking input tokens per minute
-    requests_per_day: 200          # hard daily budget; the agent PAUSES when it is used up
-    max_retries: 3                 # retries on 429 / 5xx, exponential backoff with jitter
+    requests_per_day: 20           # hard daily budget; the agent PAUSES when it is used up
+    max_retries: 2                 # retries on 5xx/transport; a 429 we cannot outwait is final
     backoff_base_seconds: 2
     backoff_max_seconds: 32

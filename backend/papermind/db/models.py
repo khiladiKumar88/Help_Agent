@@ -294,7 +294,9 @@ class LLMCallRow(Base):
     ok: Mapped[bool] = mapped_column(Boolean, default=False)
     error_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)  # the provider call alone
+    # time spent waiting for a rate-limit slot, which is NOT part of the per-call timeout
+    queue_wait_ms: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     thought_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

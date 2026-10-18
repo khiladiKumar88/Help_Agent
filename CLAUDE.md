@@ -126,14 +126,24 @@ turns a TAKE into a pending card you approve or reject (it expires after
 `copilot.card_ttl_bars`); **Auto** places it itself. `force_execute` (backtests/replays) always
 executes. The analyst is called once per signal — never per tick.
 
-**`EventBus.publish` awaits its handlers in sequence**, so whatever the analyst spends inside
-the SIGNAL handler is time the tick path is not running — including `PaperBroker.on_tick`, which
-is what evaluates stops and targets. `llm.timeout_seconds` is a budget **per attempt**, so
-`limits.max_retries` multiplies it: at 60s and 3 retries the worst case is 4 x 60s plus up to
-14s of backoff, about 4.2 minutes. That is acceptable today because a stall only delays fill
-evaluation (the paper broker replays the ticks it then receives, it does not drop them), but it
-is the reason to keep `max_retries` small, and the thing to fix first if the analyst ever needs
-a longer budget: move the call off the bus rather than raising the timeout again.
+**`EventBus.publish` awaits its handlers in sequence**, so anything slow inside a handler is
+time no other handler is running. The analyst used to be exactly that: `AgentExecutor.on_signal`
+awaited the decision inline, and signals are published from the candle-poll loop, which walks the
+instruments one at a time. Two signals on one 15m close were therefore decided strictly in series
+— BTC answered in 36s and ETH's call did not *start* until then, so ETH judged a bar that had
+closed almost a minute earlier. Live, the decision now runs as its own task
+(`AgentExecutor.concurrent_decisions`, set by `EngineOptions`) and the rate limiter is what keeps
+the fan-out inside the provider's budget; `drain_decisions()` waits for them on shutdown.
+**Replays force it off** (`clock.is_replay`): a backtest has to give the same answer twice, and
+ordering is part of that. Concurrency is safe at the broker because `PaperBroker.submit` holds
+its lock across the risk check and the fill, so two decisions can never both pass a check that
+should admit one.
+
+`llm.timeout_seconds` bounds **the provider call only** — never the wait for a rate-limit slot.
+`RateLimiter.acquire` books a slot under its lock and waits for it *outside* the lock, returns
+how long it waited, and `llm_calls.queue_wait_ms` stores that next to `latency_ms`. Holding the
+lock across the wait would quietly undo the concurrency above; charging the wait to the timeout
+would give a queued signal less time to think than an unqueued one.
 
 Replay/backtest = `Engine(cfg, clock=ReplayClock, provider=HistoricalReplayProvider,
 options=EngineOptions(drive_timers=False, force_execute=True, ...))`. Each stored bar becomes 4
@@ -232,7 +242,25 @@ make check            # the same
   `llm.prompt_version`; the version used is stored on every decision, so old decisions stay
   explainable. Never edit a shipped prompt in place.
 - The model id and every rate/budget limit come from `llm` config. Google publishes free-tier
-  limits per account in AI Studio, not in its docs, so they can never be hardcoded.
+  limits per account in AI Studio, not in its docs, so they can never be hardcoded. Set them to
+  the real numbers: `requests_per_day: 200` against a real cap of **20/day** cost a full day of
+  signals, because every call past the cap spent its whole timeout rediscovering the same 429.
+  The 429 body states the real limit — read it rather than guessing.
+- **Never let a vendor SDK own the retry policy.** `interactions.create` ships its own
+  (`max_retries=4`, exponential backoff, retrying 408/409/429/5xx) *inside one call*, and the
+  SDK builds its httpx client with `timeout=None` at every layer, pool included. Together those
+  turned a 429 that Google answers in 0.9s into a ~50s stall that reached the call log as
+  `llm_timeout` — so 106 of 149 calls were recorded as timeouts and not one as a rate limit.
+  `GeminiProvider` now passes `HttpRetryOptions(attempts=1)` plus explicit connect/read/write/pool
+  timeouts, and classifies errors by **duck-typed HTTP status**, because the Interactions API
+  raises its own `APIError` hierarchy (`status_code`, `response`) and NOT
+  `google.genai.errors.APIError` (`code`) — matching on the class sent every 429 and every 400
+  down the "retry it, it's probably the network" path.
+- A 429 whose retry-after we cannot outwait is final, not retryable, and
+  `RateLimiter.park(seconds, reason)` stops the analyst until it lifts (persisted, so a restart
+  cannot un-park it). The provider's cap is the authority; ours is a guess at it.
+- `thinking_level: minimal` is **rejected** by `gemini-3.8-flash` (400, "not supported for this
+  model"), so `low` is the floor there, not a preference.
 - New strategy ⇒ subclass `Strategy` in `strategies/builtin.py` (or a new module registered in
   `STRATEGIES`), use only `ctx.frame` (closed candles), declare `default_params` and a SMALL
   `param_grid`, return levels via `Strategy.build` (tick-rounded, sanity-checked), add tests.
@@ -288,6 +316,12 @@ make check            # the same
   test suite, and per-instrument slippage calibrated against measured order-book spreads.
 
 ### Known gaps worth fixing before they mislead anyone
+
+- The free tier allows about **20 analyst calls a day** for `gemini-3.8-flash`. On a 15m chart
+  with two instruments that is nowhere near enough to judge every signal, so most days the
+  analyst parks long before the session ends and the agent places nothing. Either raise the
+  tier, or cut the scanner down to the few signals actually worth an opinion. The Home page's
+  "Analyst today" panel exists so this is visible without opening the call log.
 
 - A **live** feed is assumed continuous between ticks: only the replay flags `Tick.gap`, so a
   genuine jump on a live feed would fill a stop at its level rather than at the jump price.

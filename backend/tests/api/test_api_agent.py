@@ -82,7 +82,12 @@ def push_tick(c: TestClient, price: str = "65000") -> None:
 
 
 def emit_signal(c: TestClient, **over: Any) -> str:
-    """Save a signal and run it through the real executor, as the scanner would."""
+    """Save a signal and run it through the real executor, as the scanner would.
+
+    Live, the decision runs as its own task so one signal cannot delay the next, so publishing
+    returns before the verdict exists. A caller that wants to assert the outcome has to wait for
+    it — which is what the engine does on shutdown too.
+    """
     e = engine_of(c)
     fields: dict[str, Any] = {
         "id": new_id("sig"),
@@ -104,6 +109,7 @@ def emit_signal(c: TestClient, **over: Any) -> str:
     e.journal.save_signal(sig)
     assert c.portal is not None
     c.portal.call(e.executor.on_signal, sig)
+    c.portal.call(e.executor.drain_decisions)
     return sig.id
 
 

@@ -4,6 +4,14 @@ Deciders: `RuleDecider` takes every strategy signal; `analyst.LLMAnalyst` asks t
 a decider says, orders still pass through the pure-code risk rules, and a decider may only make
 an order STRICTER (tighter stop, smaller size) — never looser.
 
+One signal must never delay another. The decider is an LLM call measured in seconds, and the
+signal is published from the candle-poll loop, so awaiting the decision inline held up every book
+and every other instrument behind it: two signals on the same 15m close were decided strictly one
+after the other, and the second one's clock started only when the first one's answer arrived. With
+`concurrent_decisions` the decision runs as its own task and the per-minute rate limiter is what
+keeps the fan-out inside the provider's budget. Replays leave it off, because a backtest's results
+have to be reproducible, and ordering is part of that.
+
 Mode routing (per book):
   * Manual  — signals are recorded and shown; the agent places nothing.
   * Co-pilot — a TAKE becomes a pending card the human approves or rejects. Cards expire after
@@ -21,6 +29,7 @@ Each has its own wallet and its own risk limits, so they never interfere with `m
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 from dataclasses import dataclass
@@ -136,6 +145,7 @@ class AgentExecutor:
         force_execute: bool = False,
         clock: Clock | None = None,
         shadow_raw: bool = False,
+        concurrent_decisions: bool = False,
     ) -> None:
         self.bus = bus
         self.broker = broker
@@ -145,13 +155,31 @@ class AgentExecutor:
         self.clock = clock or broker.clock
         # only worth running when something actually filters the signals (i.e. an LLM analyst)
         self.shadow_raw = shadow_raw
+        # live: decide off the publish path. Replays: strictly in order, so runs reproduce.
+        self.concurrent_decisions = concurrent_decisions
+        self._deciding: set[asyncio.Task[None]] = set()
         bus.subscribe(Topic.SIGNAL, self.on_signal)
 
     # ------------------------------------------------------------------ signal
     async def on_signal(self, sig: Signal) -> None:
         # The unfiltered strategy is traded FIRST and unconditionally, so it is never contingent
-        # on the decider — that is the whole point of the comparison.
+        # on the decider — that is the whole point of the comparison. It stays inline for that
+        # reason: it must be on the books before anyone asks the decider anything.
         await self._shadow_raw(sig)
+        if not self.concurrent_decisions:
+            await self._decide_and_route(sig)
+            return
+        task = asyncio.create_task(self._decide_and_route(sig), name=f"decide-{sig.id}")
+        self._deciding.add(task)
+        task.add_done_callback(self._deciding.discard)
+
+    async def drain_decisions(self) -> None:
+        """Wait for decisions still in flight: shutdown, and tests that assert an outcome."""
+        while self._deciding:
+            await asyncio.gather(*tuple(self._deciding), return_exceptions=True)
+
+    async def _decide_and_route(self, sig: Signal) -> None:
+        """Decide, record, then route by mode. Never raises: a failure here is NO TRADE."""
         try:
             decision = await self.decider.decide(sig)
         except Exception as exc:  # fail safe: decider error => NO TRADE
@@ -166,13 +194,19 @@ class AgentExecutor:
         await self.bus.publish(Topic.AGENT_DECISION, {"signal": sig, "decision": decision})
         if not decision.take:
             return
-        mode = self.broker.mode(sig.book_id)
-        if self.force_execute or mode == Mode.AUTO.value:
-            await self._execute(sig, decision, Account.MAIN, Actor.AGENT)
-            return
-        if mode == Mode.COPILOT.value:
-            await self._open_card(sig, decision)
-        # Manual: analysis only.
+        try:
+            mode = self.broker.mode(sig.book_id)
+            if self.force_execute or mode == Mode.AUTO.value:
+                await self._execute(sig, decision, Account.MAIN, Actor.AGENT)
+                return
+            if mode == Mode.COPILOT.value:
+                await self._open_card(sig, decision)
+            # Manual: analysis only.
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # a decision task has no caller to raise into, and a lost entry must still be visible
+            log.exception("routing the agent decision failed", extra={"signal_id": sig.id})
 
     # ------------------------------------------------------------------ execution
     async def _execute(

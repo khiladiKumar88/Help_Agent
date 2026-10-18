@@ -5,13 +5,20 @@ violation or any unexpected error all produce **SKIP**, logged with the reason. 
 only make an order stricter; the pure-code risk rules run afterwards either way.
 
 Every call is recorded in `llm_calls` with its prompt version, prompt, response, latency and
-tokens — successes and failures alike.
+tokens — successes and failures alike, and a failure records how long it actually took rather
+than zero.
+
+Two timings, kept apart on purpose. `latency_ms` is the provider call and nothing else, which
+is also exactly what `llm.timeout_seconds` bounds: a signal that waited for a rate-limit slot
+is not given less time to think because of it. `queue_wait_ms` is that waiting, recorded
+separately so a slow provider can never be mistaken for a queue of our own making.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 from pydantic import ValidationError
@@ -28,6 +35,9 @@ from papermind.llm.base import LLMError, LLMProvider, LLMRequest, LLMResponse
 from papermind.llm.limiter import RateLimiter
 
 log = logging.getLogger(__name__)
+
+# built per decision, so concurrent decisions never read each other's timings
+_Timing = dict[str, int]
 
 
 class LLMAnalyst:
@@ -105,44 +115,75 @@ class LLMAnalyst:
         )
         call_id = new_id("llm")
         prompt_hash = req.cache_key()
+        timing: _Timing = {"latency_ms": 0, "queue_wait_ms": 0}
 
         try:
-            resp = await self._call(req, prompt_hash)
+            resp = await self._call(req, prompt_hash, timing)
         except LLMError as exc:
-            return self._fail(signal, call_id, req, prompt_hash, exc.reason, str(exc))
+            return self._fail(signal, call_id, req, prompt_hash, exc.reason, str(exc), timing=timing)
         except Exception as exc:  # fail safe: nothing escapes as a trade
             log.exception("analyst call failed")
-            return self._fail(signal, call_id, req, prompt_hash, "llm_error", str(exc))
+            return self._fail(signal, call_id, req, prompt_hash, "llm_error", str(exc), timing=timing)
 
         try:
             verdict = self._parse(resp.text)
         except (ValidationError, ValueError, json.JSONDecodeError) as exc:
             return self._fail(
-                signal, call_id, req, prompt_hash, "llm_invalid_output", f"invalid JSON/schema: {exc}", resp=resp
+                signal,
+                call_id,
+                req,
+                prompt_hash,
+                "llm_invalid_output",
+                f"invalid JSON/schema: {exc}",
+                resp=resp,
+                timing=timing,
             )
 
-        self._log_call(signal, call_id, req, prompt_hash, resp, ok=True)
+        self._log_call(signal, call_id, req, prompt_hash, resp, ok=True, timing=timing)
         return self._verdict_to_decision(signal, verdict, call_id, resp)
 
     # ------------------------------------------------------------------ internals
-    async def _call(self, req: LLMRequest, prompt_hash: str) -> LLMResponse:
+    async def _call(self, req: LLMRequest, prompt_hash: str, timing: _Timing) -> LLMResponse:
         """Cache first (replays must not burn quota), then the rate limiter, then the provider."""
         if self.llm.cache_responses:
             cached = self.journal.get_llm_cache(prompt_hash, req.model)
             if cached is not None:
                 self.limiter.record_cache_hit()
                 return LLMResponse(text=cached, model=req.model, cached=True)
-        # the budget is enforced in replays too
-        await self.limiter.acquire(est_input_tokens=len(req.prompt) // 4)
+        # the budget is enforced in replays too. The wait is recorded, never charged to the call.
+        waited = await self.limiter.acquire(est_input_tokens=len(req.prompt) // 4)
+        timing["queue_wait_ms"] = int(waited * 1000)
+        started = time.monotonic()
         try:
             resp = await self.provider.complete(req)
-        except LLMError:
+        except LLMError as exc:
+            timing["latency_ms"] = int((time.monotonic() - started) * 1000)
             self.limiter.record_result(None, None, error=True)
+            self._maybe_park(exc)
             raise
+        timing["latency_ms"] = int((time.monotonic() - started) * 1000)
         self.limiter.record_result(resp.input_tokens, resp.output_tokens)
         if self.llm.cache_responses:
             self.journal.put_llm_cache(prompt_hash, req.model, resp.text)
         return resp
+
+    def _maybe_park(self, exc: LLMError) -> None:
+        """A 429 we cannot outwait means the PROVIDER's cap is spent: stop asking until it lifts.
+
+        Our `requests_per_day` is only a guess at the provider's real limit. When the provider
+        answers with a retry-after measured in hours, every later signal would otherwise spend a
+        whole timeout rediscovering the same 429 — which is exactly what fills a day's call log
+        with `llm_timeout` and no rate-limit entry anywhere in it.
+        """
+        retry_after = getattr(exc, "retry_after", None)
+        if not isinstance(retry_after, int | float) or retry_after <= self.llm.timeout_seconds:
+            return
+        self.limiter.park(float(retry_after), str(exc))
+        self.last_pause_reason = str(exc)
+        log.warning(
+            "analyst paused: the provider's own rate limit is spent",
+            extra={"retry_after_seconds": float(retry_after), "detail": str(exc)},
+        )
 
     def _parse(self, text: str) -> AnalystVerdict:
         raw = text.strip()
@@ -194,12 +235,23 @@ class LLMAnalyst:
         reason: str,
         message: str,
         resp: LLMResponse | None = None,
+        timing: _Timing | None = None,
     ) -> Decision:
         """Any failure is NO TRADE, recorded against the signal and in llm_calls."""
         if reason == "llm_budget_exhausted":
             self.last_pause_reason = message
-        log.warning("analyst: no trade", extra={"llm_reason": reason, "detail": message, "signal_id": signal.id})
-        self._log_call(signal, call_id, req, prompt_hash, resp, ok=False, reason=reason, error=message)
+        measured = timing or {}
+        log.warning(
+            "analyst: no trade",
+            extra={
+                "llm_reason": reason,
+                "detail": message,
+                "signal_id": signal.id,
+                "latency_ms": measured.get("latency_ms", 0),
+                "queue_wait_ms": measured.get("queue_wait_ms", 0),
+            },
+        )
+        self._log_call(signal, call_id, req, prompt_hash, resp, ok=False, reason=reason, error=message, timing=timing)
         text = f"NO TRADE — {reason}: {message}"
         self.journal.update_signal(
             signal.id, reasoning=text, prompt_version=self.llm.prompt_version, llm_call_id=call_id
@@ -217,7 +269,9 @@ class LLMAnalyst:
         ok: bool,
         reason: str | None = None,
         error: str | None = None,
+        timing: _Timing | None = None,
     ) -> None:
+        measured = timing or {}
         self.journal.record_llm_call(
             call_id=call_id,
             book_id=signal.book_id,
@@ -233,7 +287,9 @@ class LLMAnalyst:
             ok=ok,
             error_reason=reason,
             error=error,
-            latency_ms=resp.latency_ms if resp else 0,
+            # a failure has a real duration too: storing 0 made every timeout look instant
+            latency_ms=(resp.latency_ms if resp else 0) or measured.get("latency_ms", 0),
+            queue_wait_ms=measured.get("queue_wait_ms", 0),
             input_tokens=resp.input_tokens if resp else None,
             output_tokens=resp.output_tokens if resp else None,
             thought_tokens=resp.thought_tokens if resp else None,

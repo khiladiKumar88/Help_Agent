@@ -8,8 +8,8 @@ import { RiskFeed } from "@/components/RiskFeed";
 import { SignalsCard } from "@/components/SignalsCard";
 import { Card, CardContent } from "@/components/ui/card";
 import { api } from "@/lib/api";
-import type { ActorPnl, EquityPoint, Instrument } from "@/lib/types";
-import { fmtDateTime, fmtMoney, fmtSigned, pnlClass } from "@/lib/utils";
+import type { ActorPnl, EquityPoint, Instrument, LLMStatus } from "@/lib/types";
+import { fmtDateTime, fmtLatency, fmtMoney, fmtSigned, pnlClass } from "@/lib/utils";
 import { selectBookId, useApp } from "@/store/app";
 
 export function Home() {
@@ -99,6 +99,8 @@ export function Home() {
         <Stat label="Margin used / free" value={fmtMoney(book.used_margin, ccy)} sub={`${fmtMoney(book.available_margin, ccy)} available`} />
       </div>
 
+      {status?.llm && <LLMDayStat llm={status.llm} />}
+
       <div className="grid gap-4 xl:grid-cols-[1fr_380px]">
         <div className="space-y-4">
           {inst && (
@@ -125,6 +127,62 @@ export function Home() {
           <ActorChart pnl={actorPnl} currency={ccy} />
         </ErrorBoundary>
       </div>
+    </div>
+  );
+}
+
+/** Today's analyst calls at a glance: how many, how slow, and how many never answered.
+ *
+ * It lives on Home because the failure it exists to catch is invisible otherwise: the agent goes
+ * on logging signals and placing nothing, and you only find out by opening the call log. A day
+ * where every call stalls and a day where the model is simply busy look identical until you can
+ * see the count, the average and the timeouts side by side.
+ */
+function LLMDayStat({ llm }: { llm: LLMStatus }) {
+  const t = llm.today;
+  if (!llm.enabled && !t?.calls) return null;
+  const calls = t?.calls ?? llm.calls_today ?? 0;
+  const timeouts = t?.timeouts ?? 0;
+  const rateLimited = t?.rate_limited ?? 0;
+  const failed = t?.errors ?? 0;
+  const budget = llm.daily_budget ?? null;
+  const queue = t?.avg_queue_wait_ms ?? null;
+
+  return (
+    <Card>
+      <CardContent className="flex flex-wrap items-center gap-x-8 gap-y-2 py-3">
+        <div className="text-xs font-medium text-muted-foreground">Analyst today</div>
+        <Metric label="calls" value={budget ? `${calls} / ${budget}` : String(calls)} />
+        <Metric
+          label="avg latency"
+          value={fmtLatency(t?.avg_latency_ms)}
+          sub={t?.max_latency_ms ? `worst ${fmtLatency(t.max_latency_ms)}` : undefined}
+        />
+        <Metric
+          label="timeouts"
+          value={String(timeouts)}
+          tone={timeouts > 0 ? "bad" : undefined}
+          sub={failed > timeouts ? `${failed - timeouts} other failures` : undefined}
+        />
+        {rateLimited > 0 && <Metric label="rate limited" value={String(rateLimited)} tone="bad" />}
+        {!!t?.cached && <Metric label="cached" value={String(t.cached)} />}
+        {queue !== null && <Metric label="avg queue wait" value={fmtLatency(queue)} />}
+        {llm.paused && (
+          <div className="text-xs text-loss" title={llm.pause_reason ?? undefined}>
+            paused — {llm.pause_reason ?? "daily budget used up"}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function Metric({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: "bad" }) {
+  return (
+    <div>
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className={`text-sm font-semibold tabular-nums ${tone === "bad" ? "text-loss" : ""}`}>{value}</div>
+      {sub && <div className="text-[11px] text-muted-foreground">{sub}</div>}
     </div>
   );
 }

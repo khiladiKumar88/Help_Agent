@@ -11,7 +11,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 
 from papermind.core.clock import Clock
 from papermind.core.config import BookConfig
@@ -435,16 +435,40 @@ class Journal:
             return {c.name: getattr(row, c.name) for c in LLMCallRow.__table__.columns} if row else None
 
     def llm_usage_today(self, day_start: datetime) -> dict[str, Any]:
-        q = select(LLMCallRow).where(LLMCallRow.ts >= day_start)
+        """Today's calls from the call log itself, with the timings the Home page shows.
+
+        The average covers every call that reached the provider, failures included: a call that
+        stalled for its whole timeout really did take that long, and hiding it would flatter the
+        number exactly when it matters. Only cached answers are left out — they did no work, so
+        counting their zero would drag the average down. `timeouts` is reported alongside, because
+        a mean of 40s and a mean of 8s with five timeouts are different problems.
+        """
+        # Aggregated in SQL on purpose: this runs on the status broadcast, and the rows carry the
+        # full prompt and response. Loading them every couple of seconds to count them would
+        # move megabytes of text to add up a handful of integers.
+        r = LLMCallRow
+        timed = (~r.cached) & (r.latency_ms > 0)  # a cached answer did no work: averaging its 0 lies
+        q = select(
+            func.count().label("calls"),
+            func.sum(case((r.ok, 1), else_=0)).label("ok"),
+            func.sum(case((r.ok, 0), else_=1)).label("errors"),
+            func.sum(case((r.error_reason == "llm_timeout", 1), else_=0)).label("timeouts"),
+            func.sum(case((r.error_reason == "llm_rate_limited", 1), else_=0)).label("rate_limited"),
+            func.sum(case((r.cached, 1), else_=0)).label("cached"),
+            func.avg(case((timed, r.latency_ms))).label("avg_latency_ms"),
+            func.max(case((timed, r.latency_ms))).label("max_latency_ms"),
+            func.avg(case((r.queue_wait_ms > 0, r.queue_wait_ms))).label("avg_queue_wait_ms"),
+            func.sum(func.coalesce(r.input_tokens, 0)).label("input_tokens"),
+            func.sum(func.coalesce(r.output_tokens, 0)).label("output_tokens"),
+        ).where(r.ts >= day_start)
         with self.db.session() as s:
-            rows = list(s.scalars(q))
-        return {
-            "calls": len(rows),
-            "errors": sum(1 for r in rows if not r.ok),
-            "cached": sum(1 for r in rows if r.cached),
-            "input_tokens": sum(r.input_tokens or 0 for r in rows),
-            "output_tokens": sum(r.output_tokens or 0 for r in rows),
-        }
+            row = s.execute(q).one()
+        out: dict[str, Any] = dict(row._mapping)
+        for key in ("calls", "ok", "errors", "timeouts", "rate_limited", "cached", "input_tokens", "output_tokens"):
+            out[key] = int(out[key] or 0)
+        for key in ("avg_latency_ms", "max_latency_ms", "avg_queue_wait_ms"):
+            out[key] = round(out[key]) if out[key] is not None else None
+        return out
 
     def get_llm_cache(self, prompt_hash: str, model: str) -> str | None:
         """Cached response for an identical prompt, so replays cost no quota."""
